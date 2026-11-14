@@ -1,0 +1,2177 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>The Equity Table — A Mesa de Equity</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>♠️</text></svg>">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  :root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #0B3B2E; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useCallback } = React;
+
+/* ============================== POKER ENGINE ============================== */
+
+const SUITS = ["s", "h", "d", "c"];
+const SUIT_SYMBOL = { s: "♠", h: "♥", d: "♦", c: "♣" };
+const SUIT_RED = { s: false, h: true, d: true, c: false };
+const RANK_CHARS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"];
+const RANK_VALUE = { A: 14, K: 13, Q: 12, J: 11, T: 10, 9: 9, 8: 8, 7: 7, 6: 6, 5: 5, 4: 4, 3: 3, 2: 2 };
+const CATEGORY_NAMES = {
+  pt: ["Carta alta", "Um par", "Dois pares", "Trinca", "Sequência", "Flush", "Full house", "Quadra", "Straight flush"],
+  en: ["High card", "One pair", "Two pair", "Three of a kind", "Straight", "Flush", "Full house", "Four of a kind", "Straight flush"],
+};
+
+const FULL_DECK = RANK_CHARS.flatMap((r) =>
+  SUITS.map((s) => ({ rank: RANK_VALUE[r], suit: s, char: r, key: r + s }))
+);
+
+function kCombinations(n, k) {
+  const results = [];
+  const combo = [];
+  function backtrack(start) {
+    if (combo.length === k) { results.push([...combo]); return; }
+    for (let i = start; i < n; i++) { combo.push(i); backtrack(i + 1); combo.pop(); }
+  }
+  backtrack(0);
+  return results;
+}
+const COMBOS_5_OF_5 = kCombinations(5, 5);
+const COMBOS_5_OF_6 = kCombinations(6, 5);
+const COMBOS_5_OF_7 = kCombinations(7, 5);
+
+function evaluate5(cards) {
+  const ranks = cards.map((c) => c.rank).sort((a, b) => b - a);
+  const suits = cards.map((c) => c.suit);
+  const isFlush = suits.every((s) => s === suits[0]);
+  const uniqueRanks = [...new Set(ranks)];
+  let straightHigh = null;
+  if (uniqueRanks.length === 5) {
+    if (uniqueRanks[0] - uniqueRanks[4] === 4) straightHigh = uniqueRanks[0];
+    else if (uniqueRanks.join(",") === "14,5,4,3,2") straightHigh = 5;
+  }
+  const counts = {};
+  ranks.forEach((r) => (counts[r] = (counts[r] || 0) + 1));
+  const groups = Object.entries(counts)
+    .map(([r, c]) => ({ rank: Number(r), count: c }))
+    .sort((a, b) => b.count - a.count || b.rank - a.rank);
+
+  if (straightHigh && isFlush) return [8, straightHigh];
+  if (groups[0].count === 4) return [7, groups[0].rank, groups[1].rank];
+  if (groups[0].count === 3 && groups[1].count === 2) return [6, groups[0].rank, groups[1].rank];
+  if (isFlush) return [5, ...ranks];
+  if (straightHigh) return [4, straightHigh];
+  if (groups[0].count === 3) return [3, groups[0].rank, ...groups.slice(1).map((g) => g.rank)];
+  if (groups[0].count === 2 && groups[1].count === 2) {
+    const pairRanks = [groups[0].rank, groups[1].rank].sort((a, b) => b - a);
+    return [2, ...pairRanks, groups[2].rank];
+  }
+  if (groups[0].count === 2) return [1, groups[0].rank, ...groups.slice(1).map((g) => g.rank)];
+  return [0, ...ranks];
+}
+
+function compareArr(a, b) {
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const av = a[i] ?? -1;
+    const bv = b[i] ?? -1;
+    if (av !== bv) return av - bv;
+  }
+  return 0;
+}
+
+function bestHand(cards) {
+  const n = cards.length;
+  const combos = n === 5 ? COMBOS_5_OF_5 : n === 6 ? COMBOS_5_OF_6 : COMBOS_5_OF_7;
+  let best = null;
+  for (const idxs of combos) {
+    const hand = idxs.map((i) => cards[i]);
+    const val = evaluate5(hand);
+    if (!best || compareArr(val, best) > 0) best = val;
+  }
+  return best;
+}
+
+function generateComboCards(key) {
+  const suited = key.endsWith("s");
+  const offsuit = key.endsWith("o");
+  const r1 = key[0];
+  const r2 = key[1];
+  const combos = [];
+  if (!suited && !offsuit) {
+    for (let i = 0; i < SUITS.length; i++)
+      for (let j = i + 1; j < SUITS.length; j++)
+        combos.push([
+          { rank: RANK_VALUE[r1], suit: SUITS[i], char: r1, key: r1 + SUITS[i] },
+          { rank: RANK_VALUE[r1], suit: SUITS[j], char: r1, key: r1 + SUITS[j] },
+        ]);
+  } else if (suited) {
+    for (const s of SUITS)
+      combos.push([
+        { rank: RANK_VALUE[r1], suit: s, char: r1, key: r1 + s },
+        { rank: RANK_VALUE[r2], suit: s, char: r2, key: r2 + s },
+      ]);
+  } else {
+    for (const s1 of SUITS)
+      for (const s2 of SUITS) {
+        if (s1 === s2) continue;
+        combos.push([
+          { rank: RANK_VALUE[r1], suit: s1, char: r1, key: r1 + s1 },
+          { rank: RANK_VALUE[r2], suit: s2, char: r2, key: r2 + s2 },
+        ]);
+      }
+  }
+  return combos;
+}
+
+function shuffleSample(arr, k) {
+  const a = arr.slice();
+  const n = a.length;
+  const take = [];
+  for (let i = 0; i < k && i < n; i++) {
+    const j = i + Math.floor(Math.random() * (n - i));
+    [a[i], a[j]] = [a[j], a[i]];
+    take.push(a[i]);
+  }
+  return take;
+}
+
+function buildSimSetup({ hero, board, villainMode, villainFixed, rangeCombosAll }) {
+  const knownKeys = new Set([...hero, ...board].map((c) => c.key));
+  let baseDeck = FULL_DECK.filter((c) => !knownKeys.has(c.key));
+  let comboPool = null;
+  if (villainMode === "range") {
+    comboPool = rangeCombosAll.filter((combo) => !knownKeys.has(combo[0].key) && !knownKeys.has(combo[1].key));
+    if (comboPool.length === 0) return null;
+  } else {
+    baseDeck = baseDeck.filter((c) => c.key !== villainFixed[0].key && c.key !== villainFixed[1].key);
+  }
+  const deckSizeAtStart = FULL_DECK.length - knownKeys.size;
+  return { baseDeck, comboPool, deckSizeAtStart };
+}
+
+function runBatch(setup, hero, board, villainMode, villainFixed, count) {
+  let heroWin = 0, tie = 0, villWin = 0;
+  const needed = 5 - board.length;
+  const { baseDeck, comboPool } = setup;
+  for (let t = 0; t < count; t++) {
+    let villHand, deck;
+    if (villainMode === "range") {
+      villHand = comboPool[Math.floor(Math.random() * comboPool.length)];
+      deck = baseDeck.filter((c) => c.key !== villHand[0].key && c.key !== villHand[1].key);
+    } else {
+      villHand = villainFixed;
+      deck = baseDeck;
+    }
+    const extra = needed > 0 ? shuffleSample(deck, needed) : [];
+    const fullBoard = board.concat(extra);
+    const heroVal = bestHand(hero.concat(fullBoard));
+    const villVal = bestHand(villHand.concat(fullBoard));
+    const cmp = compareArr(heroVal, villVal);
+    if (cmp > 0) heroWin++;
+    else if (cmp < 0) villWin++;
+    else tie++;
+  }
+  return { heroWin, tie, villWin };
+}
+
+function simulate({ hero, board, villainMode, villainFixed, rangeCombosAll, trials }) {
+  const setup = buildSimSetup({ hero, board, villainMode, villainFixed, rangeCombosAll });
+  if (!setup) return null;
+  const r = runBatch(setup, hero, board, villainMode, villainFixed, trials);
+  return { ...r, trials, deckSizeAtStart: setup.deckSizeAtStart, comboPoolSize: setup.comboPool ? setup.comboPool.length : null };
+}
+
+function computeOuts(hero, board) {
+  if (board.length !== 3 && board.length !== 4) return null;
+  const knownKeys = new Set([...hero, ...board].map((c) => c.key));
+  const deck = FULL_DECK.filter((c) => !knownKeys.has(c.key));
+  const currentVal = bestHand(hero.concat(board));
+  const outsCards = [];
+  for (const card of deck) {
+    const newVal = bestHand(hero.concat(board).concat([card]));
+    if (compareArr(newVal, currentVal) > 0) outsCards.push(card);
+  }
+  const cardsToCome = board.length === 3 ? 2 : 1;
+  const ruleEstimate = Math.min(outsCards.length * (cardsToCome === 2 ? 4 : 2), 100);
+  const remaining = deck.length;
+  const nonouts = remaining - outsCards.length;
+  const exactPct = cardsToCome === 2
+    ? (1 - nCr(nonouts, 2) / nCr(remaining, 2)) * 100
+    : (outsCards.length / remaining) * 100;
+  return { outsCards, count: outsCards.length, cardsToCome, ruleEstimate, exactPct, remaining, currentCategory: currentVal[0] };
+}
+
+function nCr(n, k) {
+  if (k < 0 || k > n) return 0;
+  k = Math.min(k, n - k);
+  let result = 1;
+  for (let i = 0; i < k; i++) result = (result * (n - i)) / (i + 1);
+  return Math.round(result);
+}
+
+/* ================================ RANGE GRID ================================ */
+
+function cellKey(i, j) {
+  const hi = Math.min(i, j), lo = Math.max(i, j);
+  if (i === j) return RANK_CHARS[i] + RANK_CHARS[i];
+  return RANK_CHARS[hi] + RANK_CHARS[lo] + (i < j ? "s" : "o");
+}
+
+const PRESETS = {
+  clear: () => new Set(),
+  pairs: () => new Set(RANK_CHARS.map((r) => r + r)),
+  broadway: () => { const s = new Set(); for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) s.add(cellKey(i, j)); return s; },
+  suitedConnectors: () => { const s = new Set(); for (let i = 0; i < 12; i++) s.add(cellKey(i, i + 1)); return s; },
+  premium: () => new Set(["AA", "KK", "QQ", "JJ", "TT", "AKs", "AKo", "AQs", "AQo", "AJs", "KQs"]),
+  wide: () => {
+    const s = new Set(RANK_CHARS.map((r) => r + r));
+    for (let j = 0; j < 13; j++) if (j !== 0) s.add(cellKey(0, j));
+    for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) s.add(cellKey(i, j));
+    for (let i = 0; i < 9; i++) s.add(cellKey(i, i + 1));
+    return s;
+  },
+};
+
+const PRESET_LABELS = {
+  pt: { clear: "Limpar", pairs: "Pares", broadway: "Broadway", suited: "Conectores suited", premium: "Premium", wide: "Range largo" },
+  en: { clear: "Clear", pairs: "Pairs", broadway: "Broadway", suited: "Suited connectors", premium: "Premium", wide: "Wide range" },
+};
+
+/* ================================ UI HELPERS ================================ */
+
+const C = { felt: "#0B3B2E", ivory: "#EDE6D6", card: "#F3ECDA", ink: "#1C1B19", brass: "#C9A24B", ruby: "#A83246" };
+
+function Card({ card, onClick, small, dim }) {
+  const w = small ? 34 : 52, h = small ? 48 : 74;
+  if (!card) {
+    return (
+      <button onClick={onClick} style={{ width: w, height: h, borderRadius: 7, border: "1.5px dashed rgba(201,162,75,0.55)", background: "rgba(237,230,214,0.06)", color: "rgba(237,230,214,0.55)", fontSize: small ? 14 : 20, fontFamily: "'IBM Plex Mono', monospace" }} className="flex items-center justify-center transition hover:bg-[rgba(237,230,214,0.14)]">+</button>
+    );
+  }
+  const red = SUIT_RED[card.suit];
+  return (
+    <button onClick={onClick} disabled={!onClick} style={{ width: w, height: h, borderRadius: 7, border: "1.5px solid #C9A24B", background: C.card, color: red ? C.ruby : C.ink, fontFamily: "'IBM Plex Mono', monospace", boxShadow: "0 2px 6px rgba(0,0,0,0.3)", opacity: dim ? 0.5 : 1 }} className="flex flex-col items-center justify-center leading-none transition hover:-translate-y-0.5">
+      <span style={{ fontSize: small ? 12 : 19, fontWeight: 700 }}>{card.char}</span>
+      <span style={{ fontSize: small ? 12 : 19 }}>{SUIT_SYMBOL[card.suit]}</span>
+    </button>
+  );
+}
+
+function Ratio({ pct }) {
+  if (pct <= 0) return <span>—</span>;
+  if (pct >= 100) return <span>lock</span>;
+  return <span>{((100 - pct) / pct).toFixed(2)}:1</span>;
+}
+
+function Section({ title, note, children }) {
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div className="flex items-baseline justify-between mb-2.5">
+        <h3 className="display" style={{ fontSize: 19, fontWeight: 600, color: C.ink }}>{title}</h3>
+        {note && <span className="mono" style={{ fontSize: 11.5, color: "rgba(28,27,25,0.5)" }}>{note}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function StageBtn({ label, active, disabled, onClick }) {
+  return (
+    <button onClick={onClick} disabled={disabled} className="mono" style={{ fontSize: 11.5, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(28,27,25,0.2)", background: active ? C.felt : "#fff", color: active ? C.ivory : disabled ? "rgba(28,27,25,0.3)" : C.ink, opacity: disabled ? 0.5 : 1 }}>{label}</button>
+  );
+}
+
+function ModeBtn({ label, active, onClick }) {
+  return (
+    <button onClick={onClick} style={{ fontSize: 13, padding: "7px 14px", borderRadius: 7, fontWeight: 500, border: active ? `1px solid ${C.felt}` : "1px solid rgba(28,27,25,0.2)", background: active ? C.felt : "#fff", color: active ? C.ivory : C.ink }}>{label}</button>
+  );
+}
+
+function PresetBtn({ label, onClick }) {
+  return <button onClick={onClick} className="mono" style={{ fontSize: 11, padding: "5px 9px", borderRadius: 5, border: "1px solid rgba(11,59,46,0.3)", background: "rgba(11,59,46,0.06)", color: C.felt }}>{label}</button>;
+}
+
+function Stat({ label, pct, color }) {
+  return (
+    <div>
+      <div style={{ fontSize: 12.5, color: "rgba(28,27,25,0.6)" }}>{label}</div>
+      <div className="mono" style={{ fontSize: 26, fontWeight: 700, color }}>{pct.toFixed(1)}%</div>
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: "rgba(28,27,25,0.6)", marginBottom: 5 }}>{label}</div>
+      {children}
+    </div>
+  );
+}
+
+function Glossary({ symbol, title, text }) {
+  return (
+    <div style={{ background: "rgba(11,59,46,0.05)", borderRadius: 10, padding: "14px 16px", border: "1px solid rgba(11,59,46,0.12)" }}>
+      <div style={{ fontSize: 18, color: C.felt, marginBottom: 6 }}>{symbol}</div>
+      <div style={{ fontWeight: 600, fontSize: 14.5, marginBottom: 4, color: C.ink }}>{title}</div>
+      <div style={{ fontSize: 13, lineHeight: 1.55, color: "rgba(28,27,25,0.75)" }}>{text}</div>
+    </div>
+  );
+}
+
+function Expand({ label, children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ margin: "12px 0 4px" }}>
+      <button onClick={() => setOpen(!open)} className="mono" style={{ fontSize: 12.5, color: C.felt, background: "rgba(11,59,46,0.08)", border: "1px solid rgba(11,59,46,0.25)", borderRadius: 6, padding: "7px 13px", fontWeight: 600 }}>
+        {open ? "▾ " : "▸ "}{label}
+      </button>
+      {open && (
+        <div style={{ marginTop: 12, padding: "14px 16px", background: "rgba(28,27,25,0.03)", borderLeft: `3px solid ${C.brass}`, borderRadius: 6, fontSize: 13.5, lineHeight: 1.75, color: "rgba(28,27,25,0.85)" }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const inputStyle = { border: "1px solid rgba(28,27,25,0.25)", borderRadius: 6, padding: "8px 10px", fontSize: 14, width: 140, background: "#fff" };
+
+/* ================================ RANGE GRID COMPONENT ================================ */
+
+function RangeGrid({ lang, rangeSelection, toggleRangeCell, applyPreset }) {
+  const L = PRESET_LABELS[lang];
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2 mb-3">
+        <PresetBtn label={L.clear} onClick={() => applyPreset(PRESETS.clear)} />
+        <PresetBtn label={L.pairs} onClick={() => applyPreset(PRESETS.pairs)} />
+        <PresetBtn label={L.broadway} onClick={() => applyPreset(PRESETS.broadway)} />
+        <PresetBtn label={L.suited} onClick={() => applyPreset(PRESETS.suitedConnectors)} />
+        <PresetBtn label={L.premium} onClick={() => applyPreset(PRESETS.premium)} />
+        <PresetBtn label={L.wide} onClick={() => applyPreset(PRESETS.wide)} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(13, minmax(0,1fr))", gap: 2, maxWidth: 480 }}>
+        {RANK_CHARS.map((_, i) =>
+          RANK_CHARS.map((__, j) => {
+            const key = cellKey(i, j);
+            const selected = rangeSelection.has(key);
+            const isPair = i === j, isSuited = i < j;
+            return (
+              <button key={key} onClick={() => toggleRangeCell(key)} title={key} style={{
+                aspectRatio: "1", fontSize: 8.5, fontFamily: "'IBM Plex Mono', monospace", borderRadius: 3,
+                border: "1px solid rgba(28,27,25,0.15)",
+                background: selected ? C.felt : isPair ? "rgba(201,162,75,0.18)" : isSuited ? "rgba(11,59,46,0.08)" : "rgba(28,27,25,0.04)",
+                color: selected ? C.ivory : C.ink, fontWeight: isPair ? 700 : 500,
+              }}>{key}</button>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ================================== PAGES ================================== */
+
+function CalculadoraPage(state) {
+  const {
+    lang, heroCards, boardCount, boardCards, villainMode, setVillainMode, villainCards,
+    rangeSelection, toggleRangeCell, applyPreset, trials, setTrials, results, simulating, progress,
+    error, openPicker, setBoardCount, setBoardCards, setResults, runSimulation, setActivePage,
+  } = state;
+
+  const heroPct = results ? ((results.heroWin + results.tie / 2) / results.trials) * 100 : null;
+  const villPct = results ? ((results.villWin + results.tie / 2) / results.trials) * 100 : null;
+  const tiePct = results ? (results.tie / results.trials) * 100 : null;
+  const locale = lang === "en" ? "en-US" : "pt-BR";
+
+  if (lang === "en") {
+    return (
+      <>
+        <Section title="Your hand" note="Two cards">
+          <div className="flex gap-3">
+            <Card card={heroCards[0]} onClick={() => openPicker("hero", 0)} />
+            <Card card={heroCards[1]} onClick={() => openPicker("hero", 1)} />
+          </div>
+        </Section>
+
+        <Section title="Board" note={boardCount === 0 ? "Pre-flop" : boardCount === 3 ? "Flop" : boardCount === 4 ? "Turn" : "River"}>
+          <div className="flex flex-wrap items-center gap-3">
+            {Array.from({ length: boardCount }).map((_, i) => (
+              <Card key={i} card={boardCards[i]} onClick={() => openPicker("board", i)} />
+            ))}
+            <div className="flex gap-2 ml-1">
+              <StageBtn label="Flop" active={boardCount >= 3} onClick={() => setBoardCount(3)} />
+              <StageBtn label="Turn" active={boardCount >= 4} disabled={boardCount < 3} onClick={() => setBoardCount(4)} />
+              <StageBtn label="River" active={boardCount >= 5} disabled={boardCount < 4} onClick={() => setBoardCount(5)} />
+              <StageBtn label="Reset" onClick={() => { setBoardCount(0); setBoardCards([null, null, null, null, null]); setResults(null); }} />
+            </div>
+          </div>
+        </Section>
+
+        <Section title="Villain" note={villainMode === "specific" ? "Specific hand" : `${rangeSelection.size} combos in range`}>
+          <div className="flex gap-2 mb-3">
+            <ModeBtn label="Specific hand" active={villainMode === "specific"} onClick={() => setVillainMode("specific")} />
+            <ModeBtn label="Range" active={villainMode === "range"} onClick={() => setVillainMode("range")} />
+          </div>
+          {villainMode === "specific" ? (
+            <div className="flex gap-3">
+              <Card card={villainCards[0]} onClick={() => openPicker("villain", 0)} />
+              <Card card={villainCards[1]} onClick={() => openPicker("villain", 1)} />
+            </div>
+          ) : (
+            <RangeGrid lang={lang} rangeSelection={rangeSelection} toggleRangeCell={toggleRangeCell} applyPreset={applyPreset} />
+          )}
+        </Section>
+
+        {error && <div style={{ color: C.ruby, fontSize: 14, marginTop: 4, marginBottom: 12 }}>{error}</div>}
+
+        <div className="flex flex-wrap items-center gap-3 mt-2 mb-3">
+          <select value={trials} onChange={(e) => setTrials(Number(e.target.value))} className="mono" style={{ border: "1px solid rgba(28,27,25,0.25)", borderRadius: 6, padding: "8px 10px", background: "#fff", fontSize: 13 }}>
+            <option value={1000}>1,000 simulations (instant)</option>
+            <option value={5000}>5,000 simulations (fast)</option>
+            <option value={20000}>20,000 simulations (precise)</option>
+            <option value={100000}>100,000 simulations (very precise, ~1-2s)</option>
+            <option value={500000}>500,000 simulations (max precision, may take a while)</option>
+          </select>
+          <button onClick={runSimulation} disabled={simulating} style={{ background: C.felt, color: C.ivory, border: "none", borderRadius: 8, padding: "10px 22px", fontWeight: 600, fontSize: 14, opacity: simulating ? 0.7 : 1 }}>
+            {simulating ? `Calculating… ${Math.round(progress * 100)}%` : "Calculate equity"}
+          </button>
+        </div>
+        {simulating && (
+          <div style={{ height: 6, borderRadius: 3, background: "rgba(28,27,25,0.1)", overflow: "hidden", marginBottom: 20, maxWidth: 320 }}>
+            <div style={{ width: `${progress * 100}%`, height: "100%", background: C.brass, transition: "width 0.1s" }} />
+          </div>
+        )}
+
+        {results && (
+          <div style={{ borderTop: "1px solid rgba(28,27,25,0.15)", paddingTop: 20, marginBottom: 8 }}>
+            <div className="flex flex-wrap gap-6 mb-4">
+              <Stat label="You win" pct={heroPct} color={C.felt} />
+              <Stat label="Tie" pct={tiePct} color={C.brass} />
+              <Stat label="Villain wins" pct={villPct} color={C.ruby} />
+            </div>
+            <div style={{ height: 14, borderRadius: 7, overflow: "hidden", display: "flex", boxShadow: "inset 0 1px 3px rgba(0,0,0,0.25)" }}>
+              <div style={{ width: `${heroPct}%`, background: C.felt }} />
+              <div style={{ width: `${tiePct}%`, background: C.brass }} />
+              <div style={{ width: `${villPct}%`, background: C.ruby }} />
+            </div>
+            <div className="mono" style={{ fontSize: 12, color: "rgba(28,27,25,0.65)", marginTop: 12, lineHeight: 1.7, background: "rgba(28,27,25,0.04)", borderRadius: 8, padding: "10px 12px" }}>
+              remaining deck: {results.deckSizeAtStart} known cards<br />
+              {results.comboPoolSize !== null && <>villain combos considered: {results.comboPoolSize}<br /></>}
+              hands simulated: {results.trials.toLocaleString(locale)} · odds against you: <Ratio pct={heroPct} />
+            </div>
+            <p style={{ fontSize: 13, color: "rgba(28,27,25,0.6)", marginTop: 10 }}>
+              Want to see this number in action with pot odds? Go to the{" "}
+              <button onClick={() => setActivePage("ev")} style={{ color: C.felt, textDecoration: "underline", fontWeight: 600 }}>EV & Pot Odds</button> tab.
+            </p>
+          </div>
+        )}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Section title="Sua mão" note="Duas cartas">
+        <div className="flex gap-3">
+          <Card card={heroCards[0]} onClick={() => openPicker("hero", 0)} />
+          <Card card={heroCards[1]} onClick={() => openPicker("hero", 1)} />
+        </div>
+      </Section>
+
+      <Section title="Board" note={boardCount === 0 ? "Pré-flop" : boardCount === 3 ? "Flop" : boardCount === 4 ? "Turn" : "River"}>
+        <div className="flex flex-wrap items-center gap-3">
+          {Array.from({ length: boardCount }).map((_, i) => (
+            <Card key={i} card={boardCards[i]} onClick={() => openPicker("board", i)} />
+          ))}
+          <div className="flex gap-2 ml-1">
+            <StageBtn label="Flop" active={boardCount >= 3} onClick={() => setBoardCount(3)} />
+            <StageBtn label="Turn" active={boardCount >= 4} disabled={boardCount < 3} onClick={() => setBoardCount(4)} />
+            <StageBtn label="River" active={boardCount >= 5} disabled={boardCount < 4} onClick={() => setBoardCount(5)} />
+            <StageBtn label="Reset" onClick={() => { setBoardCount(0); setBoardCards([null, null, null, null, null]); setResults(null); }} />
+          </div>
+        </div>
+      </Section>
+
+      <Section title="Vilão" note={villainMode === "specific" ? "Mão específica" : `${rangeSelection.size} combinações no range`}>
+        <div className="flex gap-2 mb-3">
+          <ModeBtn label="Mão específica" active={villainMode === "specific"} onClick={() => setVillainMode("specific")} />
+          <ModeBtn label="Range" active={villainMode === "range"} onClick={() => setVillainMode("range")} />
+        </div>
+        {villainMode === "specific" ? (
+          <div className="flex gap-3">
+            <Card card={villainCards[0]} onClick={() => openPicker("villain", 0)} />
+            <Card card={villainCards[1]} onClick={() => openPicker("villain", 1)} />
+          </div>
+        ) : (
+          <RangeGrid lang={lang} rangeSelection={rangeSelection} toggleRangeCell={toggleRangeCell} applyPreset={applyPreset} />
+        )}
+      </Section>
+
+      {error && <div style={{ color: C.ruby, fontSize: 14, marginTop: 4, marginBottom: 12 }}>{error}</div>}
+
+      <div className="flex flex-wrap items-center gap-3 mt-2 mb-3">
+        <select value={trials} onChange={(e) => setTrials(Number(e.target.value))} className="mono" style={{ border: "1px solid rgba(28,27,25,0.25)", borderRadius: 6, padding: "8px 10px", background: "#fff", fontSize: 13 }}>
+          <option value={1000}>1.000 simulações (instantâneo)</option>
+          <option value={5000}>5.000 simulações (rápido)</option>
+          <option value={20000}>20.000 simulações (preciso)</option>
+          <option value={100000}>100.000 simulações (bem preciso, ~1-2s)</option>
+          <option value={500000}>500.000 simulações (máxima precisão, pode demorar)</option>
+        </select>
+        <button onClick={runSimulation} disabled={simulating} style={{ background: C.felt, color: C.ivory, border: "none", borderRadius: 8, padding: "10px 22px", fontWeight: 600, fontSize: 14, opacity: simulating ? 0.7 : 1 }}>
+          {simulating ? `Calculando… ${Math.round(progress * 100)}%` : "Calcular equity"}
+        </button>
+      </div>
+      {simulating && (
+        <div style={{ height: 6, borderRadius: 3, background: "rgba(28,27,25,0.1)", overflow: "hidden", marginBottom: 20, maxWidth: 320 }}>
+          <div style={{ width: `${progress * 100}%`, height: "100%", background: C.brass, transition: "width 0.1s" }} />
+        </div>
+      )}
+
+      {results && (
+        <div style={{ borderTop: "1px solid rgba(28,27,25,0.15)", paddingTop: 20, marginBottom: 8 }}>
+          <div className="flex flex-wrap gap-6 mb-4">
+            <Stat label="Você vence" pct={heroPct} color={C.felt} />
+            <Stat label="Empate" pct={tiePct} color={C.brass} />
+            <Stat label="Vilão vence" pct={villPct} color={C.ruby} />
+          </div>
+          <div style={{ height: 14, borderRadius: 7, overflow: "hidden", display: "flex", boxShadow: "inset 0 1px 3px rgba(0,0,0,0.25)" }}>
+            <div style={{ width: `${heroPct}%`, background: C.felt }} />
+            <div style={{ width: `${tiePct}%`, background: C.brass }} />
+            <div style={{ width: `${villPct}%`, background: C.ruby }} />
+          </div>
+          <div className="mono" style={{ fontSize: 12, color: "rgba(28,27,25,0.65)", marginTop: 12, lineHeight: 1.7, background: "rgba(28,27,25,0.04)", borderRadius: 8, padding: "10px 12px" }}>
+            baralho restante: {results.deckSizeAtStart} cartas conhecidas<br />
+            {results.comboPoolSize !== null && <>combinações do vilão consideradas: {results.comboPoolSize}<br /></>}
+            mãos simuladas: {results.trials.toLocaleString(locale)} · odds contra você: <Ratio pct={heroPct} />
+          </div>
+          <p style={{ fontSize: 13, color: "rgba(28,27,25,0.6)", marginTop: 10 }}>
+            Quer ver esse número em ação com pot odds? Vá para a aba{" "}
+            <button onClick={() => setActivePage("ev")} style={{ color: C.felt, textDecoration: "underline", fontWeight: 600 }}>EV & Pot Odds</button>.
+          </p>
+        </div>
+      )}
+    </>
+  );
+}
+
+function FundamentosPage({ lang }) {
+  const [n, setN] = useState(52);
+  const [k, setK] = useState(2);
+  const val = nCr(n, k);
+  const locale = lang === "en" ? "en-US" : "pt-BR";
+
+  if (lang === "en") {
+    return (
+      <>
+        <Section title="Counting hands: combinations">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            Poker is, at its core, counting. When you choose <strong>k</strong> items from a group of{" "}
+            <strong>n</strong>, without repeating and without caring about order, the number of possible combinations is:
+          </p>
+          <div className="mono" style={{ background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "12px 16px", margin: "12px 0", fontSize: 15, color: C.felt }}>
+            C(n, k) = n! / (k! × (n − k)!)
+          </div>
+
+          <Expand label="Where does this formula come from? (non-poker example)">
+            <p style={{ marginBottom: 10 }}>
+              Imagine 4 friends — Anna, Ben, Clara, and Dan — and you want to form a pair for a task.
+              How many different pairs exist?
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              <strong>Step 1 — count as if order mattered.</strong> For the 1st spot you have 4 options; once
+              chosen, 3 remain for the 2nd spot. That gives 4 × 3 = 12 "ordered arrangements"
+              (Anna-Ben, Ben-Anna, Anna-Clara, Clara-Anna, ...).
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              <strong>Step 2 — notice the repetition.</strong> But "Anna-Ben" and "Ben-Anna" are the{" "}
+              <em>same</em> pair — order doesn't matter here. Every pair was counted twice (2! = 2 ways to order 2 names).
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              <strong>Step 3 — remove the repetition.</strong> Real pairs = 12 / 2 = <strong>6</strong>{" "}
+              (AB, AC, AD, BC, BD, CD — check by counting on your fingers).
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              <strong>Generalizing:</strong> choosing k ordered items from n gives n × (n−1) × ... × (n−k+1) =
+              n!/(n−k)!. Since each group of k items can be ordered k! different ways, we divide by k! to count
+              each group exactly once. That's exactly C(n,k) = n!/(k!(n−k)!).
+            </p>
+            <p>
+              In poker, n = 52 (the deck) and k = 2 (your hand): C(52,2) = 52×51/2 = <strong>1,326</strong>{" "}
+              possible hands — the order the two cards reach you doesn't change the hand.
+            </p>
+          </Expand>
+
+          <div className="flex flex-wrap gap-4 items-end mb-3 mt-4">
+            <Field label="n (group size)"><input type="number" value={n} onChange={(e) => setN(Number(e.target.value))} className="mono" style={inputStyle} /></Field>
+            <Field label="k (how many you pick)"><input type="number" value={k} onChange={(e) => setK(Number(e.target.value))} className="mono" style={inputStyle} /></Field>
+          </div>
+          <p className="mono" style={{ fontSize: 14, color: C.ink }}>
+            C({n}, {k}) = <strong style={{ color: C.felt }}>{val.toLocaleString(locale)}</strong> possible combinations
+          </p>
+        </Section>
+
+        <Section title="Applying it to Hold'em">
+          <ul style={{ fontSize: 14.5, lineHeight: 1.9, color: C.ink, paddingLeft: 18 }}>
+            <li><strong>C(52,2) = 1,326</strong> — different 2-card hands you can be dealt.</li>
+            <li><strong>C(4,2) = 6</strong> — possible combinations of pocket Aces (AA). So the chance of being dealt AA is 6/1,326 ≈ <strong>0.45%</strong>.</li>
+            <li><strong>13 pairs + C(13,2) suited + C(13,2) offsuit = 13 + 78 + 78 = 169</strong> — that's why the range grid in the Calculator has exactly 169 cells.</li>
+            <li><strong>C(50,3) = 19,600</strong> — possible flops once you already know your 2 cards.</li>
+          </ul>
+          <Expand label="Why is the chance of AA 6/1,326, step by step?">
+            <p style={{ marginBottom: 10 }}>
+              There are 4 Aces in the deck (A♠ A♥ A♦ A♣). An AA hand is any <em>pair</em> of those 4 Aces —
+              that is, C(4,2) = 4×3/2 = <strong>6</strong> combinations: A♠A♥, A♠A♦, A♠A♣, A♥A♦, A♥A♣, A♦A♣.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              The total number of possible hands of any type is C(52,2) = 1,326 (calculated above).
+            </p>
+            <p>
+              The probability of a specific event is always <span className="mono">favorable cases / total cases</span>:
+              6/1,326 = 0.0045..., or <strong>0.45%</strong> — on average, 1 in every 221 hands.
+            </p>
+          </Expand>
+        </Section>
+
+        <Section title="Conditional probability: why the board changes everything">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            Before any card is revealed, the chance of drawing a King from a deck is one thing. Once you
+            know the card drawn is a "face card" (K, Q, or J), that chance changes — because the space of
+            possibilities shrank. That's <strong>conditional</strong> probability: P(it's a King | it's a face card).
+          </p>
+          <Expand label="Full example, outside of poker">
+            <p style={{ marginBottom: 10 }}>
+              A 52-card deck. There are 4 Kings and 12 face cards in total (4 Kings + 4 Queens + 4 Jacks).
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              <strong>With no information:</strong> P(it's a King) = 4/52 ≈ 7.7%.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              <strong>With the information "it's a face card":</strong> now only the 12 face cards matter — the
+              space of possibilities shrank from 52 to 12. P(King | face card) = 4/12 ≈ <strong>33.3%</strong>.
+            </p>
+            <p>
+              The extra information didn't change how many Kings are in the deck — it changed the{" "}
+              <em>size of the universe</em> we're considering. Same logic in poker: every board card revealed
+              shrinks the number of possible outcomes, and equity gets recalculated over that smaller
+              universe. That's why the % changes at every stage in the Calculator.
+            </p>
+          </Expand>
+        </Section>
+
+        <Section title="Expected value, before poker">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            Picture a 6-sided die that pays $12 if it lands on 6, and nothing on any other number. The
+            expected value of playing once is the sum of each outcome times its probability:
+          </p>
+          <div className="mono" style={{ background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "12px 16px", margin: "12px 0", fontSize: 14, color: C.felt }}>
+            EV = (1/6 × 12) + (5/6 × 0) = <strong>$2</strong>
+          </div>
+          <Expand label="Why do we add it up this way? (and another example: a raffle)">
+            <p style={{ marginBottom: 10 }}>
+              The definition of expected value is: for each possible outcome, multiply that outcome's value by
+              its probability, and add everything up. It's a <em>weighted average</em> by the chance of each
+              thing happening.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              For the die: there are only 2 outcome "groups" — rolling a 6 (1 in 6 chance, win $12) or not
+              (5 in 6 chance, win $0). EV = 1/6×12 + 5/6×0 = 2 + 0 = <strong>$2</strong>.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              Another example: a 100-ticket raffle costs $5 and pays $300 to 1 drawn number. EV = (1/100 × 300)
+              + (99/100 × 0) − 5 (the ticket's cost) = 3 − 5 = <strong>−$2</strong>. On average you lose $2 per
+              ticket — even though, in any given raffle, someone wins the $300.
+            </p>
+            <p>
+              This is exactly the logic — multiplying each outcome by its chance — that the{" "}
+              <strong>EV & Pot Odds</strong> tab applies to call, raise, and bluff decisions in poker.
+            </p>
+          </Expand>
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink, marginTop: 12 }}>
+            If it cost $1 to play the die, it would be worth repeating — even losing 5 out of every 6 times.
+          </p>
+        </Section>
+
+        <Section title="What 'equity' actually measures">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            Equity is conditional probability applied to poker: given everything already known (your hand,
+            the board, the villain's range), what fraction of possible outcomes ends with you winning?
+            Calculating this exactly would mean enumerating every remaining combination — often millions,
+            especially against a whole range. That's why the Calculator uses simulation (see the{" "}
+            <strong>Monte Carlo</strong> tab): instead of enumerating everything, it samples thousands of
+            random outcomes and uses the frequency as an estimate — and the Monte Carlo tab shows exactly how
+            reliable that estimate is.
+          </p>
+        </Section>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Section title="Contando mãos: combinações">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Poker é, no fundo, contar. Quando você escolhe <strong>k</strong> itens de um grupo de{" "}
+          <strong>n</strong>, sem repetir e sem se importar com a ordem, o número de combinações possíveis é:
+        </p>
+        <div className="mono" style={{ background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "12px 16px", margin: "12px 0", fontSize: 15, color: C.felt }}>
+          C(n, k) = n! / (k! × (n − k)!)
+        </div>
+
+        <Expand label="De onde vem essa fórmula? (exemplo sem poker)">
+          <p style={{ marginBottom: 10 }}>
+            Imagine 4 amigos — Ana, Bruno, Carla e Diego — e você quer formar uma dupla para uma tarefa.
+            Quantas duplas diferentes existem?
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            <strong>Passo 1 — conte como se a ordem importasse.</strong> Para a 1ª posição da dupla você tem 4
+            opções; escolhida essa, sobram 3 para a 2ª posição. Isso dá 4 × 3 = 12 "arranjos ordenados"
+            (Ana-Bruno, Bruno-Ana, Ana-Carla, Carla-Ana, ...).
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            <strong>Passo 2 — perceba a repetição.</strong> Mas "Ana-Bruno" e "Bruno-Ana" são a <em>mesma</em>{" "}
+            dupla — a ordem não importa aqui. Toda dupla foi contada 2 vezes (2! = 2 formas de ordenar 2 nomes).
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            <strong>Passo 3 — remova a repetição.</strong> Duplas de verdade = 12 / 2 = <strong>6</strong>{" "}
+            (AB, AC, AD, BC, BD, CD — confira contando na mão).
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            <strong>Generalizando:</strong> escolher k itens ordenados de n dá n × (n−1) × ... × (n−k+1) =
+            n!/(n−k)!. Como cada grupo de k itens pode ser ordenado de k! formas diferentes, dividimos por k!
+            para contar cada grupo uma única vez. Isso é exatamente C(n,k) = n!/(k!(n−k)!).
+          </p>
+          <p>
+            No poker, n = 52 (o baralho) e k = 2 (sua mão): C(52,2) = 52×51/2 = <strong>1.326</strong> mãos
+            possíveis — a ordem em que as duas cartas chegam até você não muda a mão.
+          </p>
+        </Expand>
+
+        <div className="flex flex-wrap gap-4 items-end mb-3 mt-4">
+          <Field label="n (tamanho do grupo)"><input type="number" value={n} onChange={(e) => setN(Number(e.target.value))} className="mono" style={inputStyle} /></Field>
+          <Field label="k (quantas você escolhe)"><input type="number" value={k} onChange={(e) => setK(Number(e.target.value))} className="mono" style={inputStyle} /></Field>
+        </div>
+        <p className="mono" style={{ fontSize: 14, color: C.ink }}>
+          C({n}, {k}) = <strong style={{ color: C.felt }}>{val.toLocaleString(locale)}</strong> combinações possíveis
+        </p>
+      </Section>
+
+      <Section title="Aplicando ao Hold'em">
+        <ul style={{ fontSize: 14.5, lineHeight: 1.9, color: C.ink, paddingLeft: 18 }}>
+          <li><strong>C(52,2) = 1.326</strong> — mãos de 2 cartas diferentes que você pode receber.</li>
+          <li><strong>C(4,2) = 6</strong> — combinações de par de Ases (AA) possíveis. Logo, a chance de receber AA é 6/1.326 ≈ <strong>0,45%</strong>.</li>
+          <li><strong>13 pares + C(13,2) suited + C(13,2) offsuit = 13 + 78 + 78 = 169</strong> — é por isso que o grid de range na Calculadora tem exatamente 169 células.</li>
+          <li><strong>C(50,3) = 19.600</strong> — flops possíveis depois que você já sabe suas 2 cartas.</li>
+        </ul>
+        <Expand label="Por que a chance de AA é 6/1.326, passo a passo?">
+          <p style={{ marginBottom: 10 }}>
+            Existem 4 Ases no baralho (A♠ A♥ A♦ A♣). Uma mão de AA é qualquer <em>par</em> desses 4 Ases —
+            ou seja, C(4,2) = 4×3/2 = <strong>6</strong> combinações: A♠A♥, A♠A♦, A♠A♣, A♥A♦, A♥A♣, A♦A♣.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            O total de mãos possíveis de qualquer tipo é C(52,2) = 1.326 (calculado acima).
+          </p>
+          <p>
+            A probabilidade de um evento específico é sempre <span className="mono">casos favoráveis / casos totais</span>:
+            6/1.326 = 0,0045..., ou <strong>0,45%</strong> — em média, 1 a cada 221 mãos.
+          </p>
+        </Expand>
+      </Section>
+
+      <Section title="Probabilidade condicional: por que o board muda tudo">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Antes de qualquer carta ser revelada, a chance de tirar um Rei de um baralho é uma coisa. Depois que
+          você já sabe que a carta tirada é uma "figura" (K, Q ou J), essa chance muda — porque o espaço de
+          possibilidades diminuiu. Isso é probabilidade <strong>condicional</strong>: P(é Rei | é figura).
+        </p>
+        <Expand label="Exemplo completo, fora do poker">
+          <p style={{ marginBottom: 10 }}>
+            Baralho de 52 cartas. Existem 4 Reis e 12 figuras no total (4 Reis + 4 Damas + 4 Valetes).
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            <strong>Sem nenhuma informação:</strong> P(é Rei) = 4/52 ≈ 7,7%.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            <strong>Com a informação "é uma figura":</strong> agora só nos importam as 12 figuras — o espaço de
+            possibilidades encolheu de 52 para 12. P(é Rei | é figura) = 4/12 ≈ <strong>33,3%</strong>.
+          </p>
+          <p>
+            A informação extra não mudou os Reis no baralho — mudou o <em>tamanho do universo</em> que estamos
+            considerando. É a mesma lógica no poker: cada carta do board revelada reduz o número de finais
+            possíveis, e a equity é recalculada sobre esse universo menor. Por isso a % muda a cada estágio na
+            Calculadora.
+          </p>
+        </Expand>
+      </Section>
+
+      <Section title="Valor esperado, antes do poker">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Pense num dado de 6 lados que paga R$12 se cair 6, e nada em qualquer outro número. O valor esperado
+          de jogar uma vez é a soma de cada resultado vezes sua probabilidade:
+        </p>
+        <div className="mono" style={{ background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "12px 16px", margin: "12px 0", fontSize: 14, color: C.felt }}>
+          EV = (1/6 × 12) + (5/6 × 0) = <strong>R$2</strong>
+        </div>
+        <Expand label="Por que somamos assim? E outro exemplo (loteria)">
+          <p style={{ marginBottom: 10 }}>
+            A definição de valor esperado é: para cada resultado possível, multiplique o valor desse resultado
+            pela sua probabilidade, e some tudo. É uma <em>média ponderada</em> pelas chances de cada coisa
+            acontecer.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            No dado: só há 2 "grupos" de resultado — sair 6 (1 em 6 chances, ganha R$12) ou não sair 6 (5 em 6
+            chances, ganha R$0). EV = 1/6×12 + 5/6×0 = 2 + 0 = <strong>R$2</strong>.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            Outro exemplo: uma rifa de 100 números custa R$5, e paga R$300 para 1 número sorteado. EV = (1/100 ×
+            300) + (99/100 × 0) − 5 (o custo do bilhete) = 3 − 5 = <strong>−R$2</strong>. Em média, você perde
+            R$2 por bilhete — mesmo que, numa rifa específica, alguém ganhe os R$300.
+          </p>
+          <p>
+            É exatamente essa lógica — multiplicar cada desfecho pela sua chance — que a aba{" "}
+            <strong>EV & Pot Odds</strong> aplica a decisões de call, raise e blefe no poker.
+          </p>
+        </Expand>
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink, marginTop: 12 }}>
+          Se custasse R$1 para jogar o dado, valeria a pena repetir — mesmo perdendo 5 em cada 6 vezes.
+        </p>
+      </Section>
+
+      <Section title="O que 'equity' realmente mede">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Equity é uma probabilidade condicional aplicada ao poker: dado tudo que já se sabe (sua mão, o board,
+          o range do vilão), qual fração dos desfechos possíveis termina com você vencendo? Calcular isso
+          exatamente significaria enumerar todas as combinações restantes — muitas vezes milhões, especialmente
+          contra um range inteiro. Por isso a Calculadora usa simulação (veja a aba <strong>Monte Carlo</strong>):
+          em vez de enumerar tudo, ela amostra milhares de desfechos aleatórios e usa a frequência como
+          estimativa — e a aba Monte Carlo mostra exatamente quão confiável essa estimativa é.
+        </p>
+      </Section>
+    </>
+  );
+}
+
+function OutsPage({ lang, heroCards, boardCount, boardCards, setActivePage, results, villainMode }) {
+  const heroReady = heroCards[0] && heroCards[1];
+  const board = boardCards.slice(0, boardCount);
+  const outs = heroReady && (boardCount === 3 || boardCount === 4) ? computeOuts(heroCards, board) : null;
+  const catNames = CATEGORY_NAMES[lang];
+
+  if (lang === "en") {
+    return (
+      <>
+        <Section title="What is an 'out'">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            An <strong>out</strong> is any card still in the deck that, if it comes, upgrades your hand to a
+            stronger category than it is now. Counting outs is the basis for quick decisions at the table,
+            without running a full simulation.
+          </p>
+        </Section>
+
+        <Section title="The rule of 2 and 4">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            A mental shortcut to convert outs into an approximate probability, without counting:
+          </p>
+          <ul style={{ fontSize: 14.5, lineHeight: 1.9, color: C.ink, paddingLeft: 18 }}>
+            <li><strong>2 cards</strong> left to come (you're on the flop) → outs × <strong>4</strong> ≈ % to improve by the river.</li>
+            <li><strong>1 card</strong> left to come (you're on the turn) → outs × <strong>2</strong> ≈ % to improve on the river.</li>
+          </ul>
+          <p style={{ fontSize: 13.5, color: "rgba(28,27,25,0.6)", marginTop: 6 }}>
+            It's an approximation (the exact value is slightly lower because of "duplicate outs" when 2 cards
+            remain) — but it's fast enough to calculate in your head mid-hand.
+          </p>
+          <Expand label="Where exactly do the 4 and the 2 come from?">
+            <p style={{ marginBottom: 10 }}>
+              After the flop, 47 unknown cards remain (52 − 2 in your hand − 3 on the flop). The chance of ONE
+              specific card (one of your outs) coming on the turn is simply 1/47.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              If you have <span className="mono">outs</span> good cards, the chance the turn brings one of them
+              is approximately <span className="mono">outs/47</span>. Doing the same for the river (now with 46
+              cards left), and adding both chances (turn OR river), you get close to{" "}
+              <span className="mono">outs × (1/47 + 1/46) ≈ outs × 0.0435</span>, i.e. almost exactly{" "}
+              <strong>outs × 4.35%</strong>.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              Rounding to <strong>×4</strong> is easier to calculate mentally and stays close — just slightly
+              optimistic, because this simple sum double-counts the rare case where both outs come together
+              (turn AND river). For a single card (turn to river only), the exact chance is{" "}
+              <span className="mono">outs/46 ≈ outs × 2.17%</span>, rounded to <strong>×2</strong>.
+            </p>
+            <p>
+              The calculation below, "hypergeometric," is the version without that approximation — it's the
+              exact number, useful to see how far the rule of 2 and 4 drifts from reality (usually not much).
+            </p>
+          </Expand>
+        </Section>
+
+        <Section title="Counting outs for your current hand" note="Uses hero/board from the Calculator tab">
+          {!heroReady ? (
+            <p style={{ fontSize: 14, color: "rgba(28,27,25,0.6)" }}>
+              Choose your hand on the <button onClick={() => setActivePage("calculadora")} style={{ color: C.felt, textDecoration: "underline", fontWeight: 600 }}>Calculator</button> tab first.
+            </p>
+          ) : boardCount !== 3 && boardCount !== 4 ? (
+            <p style={{ fontSize: 14, color: "rgba(28,27,25,0.6)" }}>
+              Counting outs only makes sense with the <strong>flop</strong> or <strong>turn</strong> on the
+              table. Go to the <button onClick={() => setActivePage("calculadora")} style={{ color: C.felt, textDecoration: "underline", fontWeight: 600 }}>Calculator</button> tab
+              and deal the flop.
+            </p>
+          ) : (
+            <div>
+              <div className="flex gap-2 items-center mb-3">
+                {heroCards.map((c, i) => <Card key={"h" + i} card={c} small />)}
+                <span style={{ color: "rgba(28,27,25,0.4)", margin: "0 4px" }}>+</span>
+                {board.map((c, i) => <Card key={"b" + i} card={c} small />)}
+              </div>
+              <p style={{ fontSize: 14, color: C.ink, marginBottom: 10 }}>
+                Current hand: <strong>{catNames[outs.currentCategory]}</strong>. Cards that improve your hand: <strong style={{ color: C.felt }}>{outs.count} outs</strong>.
+              </p>
+              <div className="flex flex-wrap gap-1.5 mb-4">
+                {outs.outsCards.map((c) => <Card key={c.key} card={c} small />)}
+                {outs.outsCards.length === 0 && <span style={{ fontSize: 13, color: "rgba(28,27,25,0.5)" }}>No card improves your current hand.</span>}
+              </div>
+              <div className="mono" style={{ fontSize: 13, background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "10px 14px", color: C.ink, lineHeight: 1.9 }}>
+                rule of {outs.cardsToCome === 2 ? "4" : "2"}: {outs.count} outs × {outs.cardsToCome === 2 ? 4 : 2} ≈ <strong>{outs.ruleEstimate}%</strong><br />
+                exact calculation (hypergeometric): <strong>{outs.exactPct.toFixed(1)}%</strong>
+                {results && villainMode && <><br />simulated real equity (Calculator tab, already accounts for the villain): <strong>{(((results.heroWin + results.tie / 2) / results.trials) * 100).toFixed(1)}%</strong></>}
+              </div>
+              <p style={{ fontSize: 12.5, color: "rgba(28,27,25,0.55)", marginTop: 10, lineHeight: 1.6 }}>
+                The exact calculation uses the hypergeometric distribution: among the {outs.remaining} cards
+                that can still come, {outs.count} are outs. The chance of at least one appearing in{" "}
+                {outs.cardsToCome} card{outs.cardsToCome > 1 ? "s" : ""} is{" "}
+                <span className="mono">1 − C(non-outs, {outs.cardsToCome}) / C(remaining, {outs.cardsToCome})</span>.
+                Notice it comes in a bit below the rule of {outs.cardsToCome === 2 ? "4" : "2"} — the rule
+                overestimates on purpose, as a quick approximation.
+              </p>
+              <Expand label="The hypergeometric calculation, explained with marbles in an urn">
+                <p style={{ marginBottom: 10 }}>
+                  Forget cards for a moment. Imagine an urn with {outs.remaining} marbles: {outs.count} of them
+                  are <strong>blue</strong> (your outs) and {outs.remaining - outs.count} are{" "}
+                  <strong>red</strong>. You'll draw {outs.cardsToCome} marble{outs.cardsToCome > 1 ? "s" : ""}{" "}
+                  without replacement. What's the chance of drawing at least one blue?
+                </p>
+                <p style={{ marginBottom: 10 }}>
+                  <strong>Easier path: calculate the opposite.</strong> "At least one blue" is the opposite of
+                  "no blue" (i.e., all red). It's simpler to calculate the chance of drawing only red, then
+                  subtract that from 1.
+                </p>
+                <p style={{ marginBottom: 10 }}>
+                  The chance of drawing {outs.cardsToCome} marbles <em>all red</em>, among{" "}
+                  {outs.remaining - outs.count} available reds, using the combinations formula you saw in the
+                  Fundamentals tab: <span className="mono">C(red, {outs.cardsToCome}) / C(total, {outs.cardsToCome})</span>.
+                </p>
+                <p style={{ marginBottom: 10 }}>
+                  So: P(at least one blue) = 1 − P(no blue) = 1 − C({outs.remaining - outs.count},{" "}
+                  {outs.cardsToCome}) / C({outs.remaining}, {outs.cardsToCome}) = <strong>{outs.exactPct.toFixed(1)}%</strong>.
+                </p>
+                <p>
+                  It's the exact same reasoning for outs in poker: the "blue" cards are the ones that improve
+                  your hand, the "red" ones don't help, and the urn is the remaining deck.
+                </p>
+              </Expand>
+            </div>
+          )}
+        </Section>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Section title="O que é um 'out'">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Um <strong>out</strong> é qualquer carta ainda no baralho que, se sair, melhora sua mão para uma
+          categoria (ou força) mais forte do que ela é agora. Contar outs é a base de decisões rápidas na mesa,
+          sem precisar rodar uma simulação inteira.
+        </p>
+      </Section>
+
+      <Section title="Regra do 2 e do 4">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          É um atalho mental para converter outs em probabilidade aproximada, sem contar:
+        </p>
+        <ul style={{ fontSize: 14.5, lineHeight: 1.9, color: C.ink, paddingLeft: 18 }}>
+          <li>Faltam <strong>2 cartas</strong> (você está no flop) → outs × <strong>4</strong> ≈ % de melhorar até o river.</li>
+          <li>Falta <strong>1 carta</strong> (você está no turn) → outs × <strong>2</strong> ≈ % de melhorar no river.</li>
+        </ul>
+        <p style={{ fontSize: 13.5, color: "rgba(28,27,25,0.6)", marginTop: 6 }}>
+          É uma aproximação (o valor exato é ligeiramente menor por causa de "outs duplicados" quando faltam 2
+          cartas) — mas é rápida o bastante para calcular de cabeça durante uma mão.
+        </p>
+        <Expand label="De onde vêm exatamente o 4 e o 2?">
+          <p style={{ marginBottom: 10 }}>
+            Depois do flop, restam 47 cartas desconhecidas (52 − 2 da sua mão − 3 do flop). A chance de UMA
+            carta específica (um dos seus outs) sair no turn é simplesmente 1/47.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            Se você tem <span className="mono">outs</span> cartas boas, a chance de o turn trazer uma delas é
+            aproximadamente <span className="mono">outs/47</span>. Fazendo o mesmo raciocínio pro river (agora
+            com 46 cartas restantes), e somando as duas chances (turn OU river), chega-se a algo perto de{" "}
+            <span className="mono">outs × (1/47 + 1/46) ≈ outs × 0,0435</span>, ou seja, quase exatamente{" "}
+            <strong>outs × 4,35%</strong>.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            Arredondar para <strong>×4</strong> é mais fácil de calcular de cabeça e fica bem próximo — só um
+            pouco otimista, porque essa soma simples conta duas vezes o caso raro em que os dois outs saem
+            juntos (turn E river). Para 1 carta só (do turn pro river), a chance exata é{" "}
+            <span className="mono">outs/46 ≈ outs × 2,17%</span>, arredondado para <strong>×2</strong>.
+          </p>
+          <p>
+            O cálculo abaixo, "hipergeométrico", é a versão sem essa aproximação — é o número exato, e serve pra
+            você ver o quanto a regra do 2 e do 4 se afasta da realidade (geralmente pouco).
+          </p>
+        </Expand>
+      </Section>
+
+      <Section title="Contando outs na sua mão atual" note="Usa hero/board da aba Calculadora">
+        {!heroReady ? (
+          <p style={{ fontSize: 14, color: "rgba(28,27,25,0.6)" }}>
+            Escolha sua mão na aba <button onClick={() => setActivePage("calculadora")} style={{ color: C.felt, textDecoration: "underline", fontWeight: 600 }}>Calculadora</button> primeiro.
+          </p>
+        ) : boardCount !== 3 && boardCount !== 4 ? (
+          <p style={{ fontSize: 14, color: "rgba(28,27,25,0.6)" }}>
+            Contagem de outs só faz sentido com o <strong>flop</strong> ou <strong>turn</strong> na mesa. Vá até a
+            aba <button onClick={() => setActivePage("calculadora")} style={{ color: C.felt, textDecoration: "underline", fontWeight: 600 }}>Calculadora</button> e
+            revele o flop.
+          </p>
+        ) : (
+          <div>
+            <div className="flex gap-2 items-center mb-3">
+              {heroCards.map((c, i) => <Card key={"h" + i} card={c} small />)}
+              <span style={{ color: "rgba(28,27,25,0.4)", margin: "0 4px" }}>+</span>
+              {board.map((c, i) => <Card key={"b" + i} card={c} small />)}
+            </div>
+            <p style={{ fontSize: 14, color: C.ink, marginBottom: 10 }}>
+              Mão atual: <strong>{catNames[outs.currentCategory]}</strong>. Cartas que melhoram sua mão: <strong style={{ color: C.felt }}>{outs.count} outs</strong>.
+            </p>
+            <div className="flex flex-wrap gap-1.5 mb-4">
+              {outs.outsCards.map((c) => <Card key={c.key} card={c} small />)}
+              {outs.outsCards.length === 0 && <span style={{ fontSize: 13, color: "rgba(28,27,25,0.5)" }}>Nenhuma carta melhora sua mão atual.</span>}
+            </div>
+            <div className="mono" style={{ fontSize: 13, background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "10px 14px", color: C.ink, lineHeight: 1.9 }}>
+              regra do {outs.cardsToCome === 2 ? "4" : "2"}: {outs.count} outs × {outs.cardsToCome === 2 ? 4 : 2} ≈ <strong>{outs.ruleEstimate}%</strong><br />
+              cálculo exato (hipergeométrico): <strong>{outs.exactPct.toFixed(1)}%</strong>
+              {results && villainMode && <><br />equity real simulada (aba Calculadora, já considera o vilão): <strong>{(((results.heroWin + results.tie / 2) / results.trials) * 100).toFixed(1)}%</strong></>}
+            </div>
+            <p style={{ fontSize: 12.5, color: "rgba(28,27,25,0.55)", marginTop: 10, lineHeight: 1.6 }}>
+              O cálculo exato usa a distribuição hipergeométrica: entre as {outs.remaining} cartas que ainda
+              podem sair, {outs.count} são outs. A chance de pelo menos uma delas aparecer em {outs.cardsToCome}{" "}
+              carta{outs.cardsToCome > 1 ? "s" : ""} é <span className="mono">1 − C(não-outs, {outs.cardsToCome}) / C(restantes, {outs.cardsToCome})</span>.
+              Repare que ele fica um pouco abaixo da regra do {outs.cardsToCome === 2 ? "4" : "2"} — a regra
+              superestima de propósito, como uma aproximação rápida.
+            </p>
+            <Expand label="O cálculo hipergeométrico, explicado com bolinhas numa urna">
+              <p style={{ marginBottom: 10 }}>
+                Esquece as cartas por um instante. Imagine uma urna com {outs.remaining} bolinhas: {outs.count}{" "}
+                delas são <strong>azuis</strong> (seus outs) e {outs.remaining - outs.count} são{" "}
+                <strong>vermelhas</strong>. Você vai tirar {outs.cardsToCome} bolinha{outs.cardsToCome > 1 ? "s" : ""}{" "}
+                sem devolver. Qual a chance de tirar pelo menos uma azul?
+              </p>
+              <p style={{ marginBottom: 10 }}>
+                <strong>Caminho mais fácil: calcule o oposto.</strong> "Pelo menos uma azul" é o oposto de "nenhuma
+                azul" (ou seja, todas vermelhas). É mais simples calcular a chance de tirar só vermelhas, e depois
+                fazer 1 menos esse valor.
+              </p>
+              <p style={{ marginBottom: 10 }}>
+                A chance de tirar {outs.cardsToCome} bolinhas <em>todas vermelhas</em>, entre{" "}
+                {outs.remaining - outs.count} vermelhas disponíveis, usando a fórmula de combinações que você viu
+                na aba Fundamentos: <span className="mono">C(vermelhas, {outs.cardsToCome}) / C(total, {outs.cardsToCome})</span>.
+              </p>
+              <p style={{ marginBottom: 10 }}>
+                Então: P(pelo menos uma azul) = 1 − P(nenhuma azul) = 1 − C({outs.remaining - outs.count},{" "}
+                {outs.cardsToCome}) / C({outs.remaining}, {outs.cardsToCome}) = <strong>{outs.exactPct.toFixed(1)}%</strong>.
+              </p>
+              <p>
+                É exatamente o mesmo raciocínio para os outs no poker: as cartas "azuis" são as que melhoram sua
+                mão, as "vermelhas" são as que não ajudam, e a urna é o baralho restante.
+              </p>
+            </Expand>
+          </div>
+        )}
+      </Section>
+    </>
+  );
+}
+
+function EVPage({ lang, potSize, setPotSize, betToCall, setBetToCall, results, setActivePage }) {
+  const [betSize, setBetSize] = useState(40);
+  const [equityWhenCalled, setEquityWhenCalled] = useState(25);
+
+  const requiredEquity = potSize + betToCall > 0 ? (betToCall / (potSize + betToCall)) * 100 : 0;
+  const heroPct = results ? ((results.heroWin + results.tie / 2) / results.trials) * 100 : null;
+  const canDecide = heroPct !== null;
+  const isProfitableCall = canDecide && heroPct > requiredEquity;
+
+  const eq = equityWhenCalled / 100;
+  const kTerm = eq * (potSize + 2 * betSize) - betSize;
+  const requiredFold = potSize - kTerm !== 0 ? Math.max(0, Math.min(100, (-kTerm / (potSize - kTerm)) * 100)) : 0;
+  const pureBluffFold = (betSize / (potSize + betSize)) * 100;
+
+  if (lang === "en") {
+    return (
+      <>
+        <Section title="Expected value (EV)">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            EV is the average of what you win (or lose) if you repeated the same decision infinitely many
+            times. For a call, in simplified form:
+          </p>
+          <div className="mono" style={{ background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "12px 16px", margin: "12px 0", fontSize: 14, color: C.felt }}>
+            EV(call) = (equity × pot if you win) − ((1 − equity) × cost of the call)
+          </div>
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            If EV(call) is positive, calling is profitable in the long run — even if you lose <em>this</em>{" "}
+            particular hand. That's what separates a good decision from a good result.
+          </p>
+          <div className="mono" style={{ fontSize: 12.5, background: "rgba(28,27,25,0.04)", borderRadius: 8, padding: "12px 14px", lineHeight: 1.8, color: C.ink }}>
+            Example: pot of 80, villain bets 20 (pot becomes 100), you need to call 20.<br />
+            Your equity is 30% → EV(call) = 0.30 × 100 − 0.70 × 20 = 30 − 14 = <strong style={{ color: C.felt }}>+16</strong><br />
+            Positive EV: calling is profitable, even losing 70% of the time.
+          </div>
+          <Expand label="Why does this formula work? (a simple bet example)">
+            <p style={{ marginBottom: 10 }}>
+              Imagine a bet outside of poker: you pay $20 to enter. If a certain event happens (30% chance),
+              you get $100 back. If not (70% chance), you lose the $20.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              <strong>Step 1:</strong> In the 30% of cases it hits, your net gain is $100 (the prize) − $20 (what
+              you paid) — but to keep it simple, we treat it as "win the pot" and separately "lose the call" —
+              that's how EV is normally calculated in poker, looking at the pot and the cost of the call separately.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              <strong>Step 2:</strong> Multiply each outcome by its chance: 30% of the time you win the whole pot
+              (100) → 0.30 × 100 = 30. 70% of the time you only lose what you paid (20) → 0.70 × 20 = 14 of
+              expected loss.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              <strong>Step 3:</strong> Add expected gain minus expected loss: 30 − 14 = <strong>+16</strong>.
+              Positive means that, repeating this decision many times, you come out ahead on average — even
+              losing most individual times.
+            </p>
+            <p>
+              Same reasoning as the dice example in the Fundamentals tab: multiply each outcome by its
+              probability, and sum.
+            </p>
+          </Expand>
+        </Section>
+
+        <Section title="Pot odds: the shortcut for a call decision">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            Instead of calculating EV in money, you can convert it directly into <strong>required equity %</strong>:
+          </p>
+          <div className="mono" style={{ background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "12px 16px", margin: "12px 0", fontSize: 14, color: C.felt }}>
+            required equity = call amount / (pot + call amount)
+          </div>
+          <Expand label="How this formula is derived from the EV formula above">
+            <p style={{ marginBottom: 10 }}>
+              We want to find the break-even point: the minimum equity that makes EV(call) = 0 — below it,
+              calling loses money; above it, it's profitable.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              Starting from <span className="mono">EV = equity × pot − (1 − equity) × call</span>, set it to
+              zero: <span className="mono">0 = equity × pot − (1 − equity) × call</span>.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              Expanding: <span className="mono">0 = equity × pot − call + equity × call</span>. Grouping the
+              "equity" terms: <span className="mono">call = equity × (pot + call)</span>.
+            </p>
+            <p>
+              Isolating equity: <span className="mono">equity = call / (pot + call)</span> — exactly the pot
+              odds formula. It's nothing more than "solving the EV equation for equity equal to zero."
+            </p>
+          </Expand>
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink, margin: "16px 0" }}>
+            If your real equity (calculated on the Calculator tab) is <strong>higher</strong> than this required
+            %, calling is +EV. If it's lower, it's −EV — fold.
+          </p>
+
+          <div className="flex flex-wrap gap-4 mb-3">
+            <Field label="Pot size (already including villain's bet)">
+              <input type="number" min="0" value={potSize} onChange={(e) => setPotSize(Number(e.target.value))} className="mono" style={inputStyle} />
+            </Field>
+            <Field label="How much you need to call">
+              <input type="number" min="0" value={betToCall} onChange={(e) => setBetToCall(Number(e.target.value))} className="mono" style={inputStyle} />
+            </Field>
+          </div>
+          <p style={{ fontSize: 14.5, lineHeight: 1.6, color: C.ink }}>
+            Pot odds of <span className="mono">{potSize}:{betToCall}</span> → you need to win at least{" "}
+            <strong className="mono">{requiredEquity.toFixed(1)}%</strong> of the time.
+            {canDecide ? (
+              <>
+                {" "}Your simulated equity is <strong className="mono">{heroPct.toFixed(1)}%</strong>, so this
+                call is{" "}
+                <strong style={{ color: isProfitableCall ? C.felt : C.ruby }}>
+                  {isProfitableCall ? "profitable (+EV) — call it" : "a loser (−EV) — fold"}
+                </strong>.
+              </>
+            ) : (
+              <> Run a simulation on the <button onClick={() => setActivePage("calculadora")} style={{ color: C.felt, textDecoration: "underline", fontWeight: 600 }}>Calculator</button> tab to compare against your real equity.</>
+            )}
+          </p>
+        </Section>
+
+        <Section title="Implied odds: looking beyond this bet">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            Pot odds only look at the pot right now. <strong>Implied odds</strong> add the extra money you
+            expect to win <em>later</em> if you complete your hand — for example, when you have a flush draw
+            and expect the villain to pay off another bet on the river if you hit. This means a call that
+            looks −EV by pure pot odds can be +EV in practice, if the villain tends to pay big bets afterward.
+            The opposite also exists: <strong>reverse implied odds</strong>, where completing your hand can
+            still lose to a better hand — common with "small" draws like a low straight against a board that
+            also allows a flush.
+          </p>
+        </Section>
+
+        <Section title="And when you bet or raise instead of calling?">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            So far we've looked at the decision to <em>call</em>. But betting or raising changes the problem:
+            now you win in two ways — when the villain folds (you take the pot regardless of your hand) or
+            when they call and you have the better hand. The chance they fold is called <strong>fold equity</strong>.
+          </p>
+
+          <div className="flex flex-wrap gap-4 mb-3 mt-3">
+            <Field label="Pot size before your bet">
+              <input type="number" min="0" value={potSize} onChange={(e) => setPotSize(Number(e.target.value))} className="mono" style={inputStyle} />
+            </Field>
+            <Field label="How much you'd bet (raise/bet)">
+              <input type="number" min="0" value={betSize} onChange={(e) => setBetSize(Number(e.target.value))} className="mono" style={inputStyle} />
+            </Field>
+          </div>
+
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            If your hand has <strong>zero</strong> chance when called (a pure bluff), the math is symmetric to
+            pot odds — but from the other side of the table:
+          </p>
+          <div className="mono" style={{ background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "12px 16px", margin: "12px 0", fontSize: 14, color: C.felt }}>
+            required fold equity = bet / (pot + bet)
+          </div>
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            With these numbers: you need the villain to fold at least{" "}
+            <strong className="mono">{pureBluffFold.toFixed(1)}%</strong> of the time for a pure bluff to be worth it.
+          </p>
+
+          <Expand label="What if I have some chance even when called? (semi-bluff)">
+            <p style={{ marginBottom: 10 }}>
+              A <strong>semi-bluff</strong> is betting with a hand that isn't the best yet, but has outs — like
+              a flush draw on the flop. You win in three ways: the villain folds now, or calls and you complete
+              your hand, or calls and you don't (you lose).
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              The full EV formula: <span className="mono">EV = f × pot + (1−f) × (equity × (pot + 2×bet) − bet)</span>,
+              where <span className="mono">f</span> is the villain's fold equity and <span className="mono">equity</span>{" "}
+              is your chance of winning <em>when they call</em>. The term <span className="mono">(pot + 2×bet)</span>{" "}
+              is the final pot if they call (the original pot, plus your bet, plus their call).
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              Solving this equation for f = 0 (same as we did for pot odds), we find the minimum fold equity
+              needed for the semi-bluff to be worth it — and it comes out <em>lower</em> than for a pure bluff,
+              because you have a second way to win even when called.
+            </p>
+            <div className="flex flex-wrap gap-4 my-3">
+              <Field label="Your estimated equity IF called (%)">
+                <input type="number" min="0" max="100" value={equityWhenCalled} onChange={(e) => setEquityWhenCalled(Number(e.target.value))} className="mono" style={inputStyle} />
+              </Field>
+            </div>
+            <p className="mono" style={{ fontSize: 13, background: "rgba(28,27,25,0.04)", borderRadius: 8, padding: "10px 14px" }}>
+              required fold equity (semi-bluff): <strong style={{ color: C.felt }}>{requiredFold.toFixed(1)}%</strong>{" "}
+              (vs {pureBluffFold.toFixed(1)}% for a pure bluff with 0% equity)
+            </p>
+          </Expand>
+
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink, marginTop: 16 }}>
+            Some practical guidelines for when each action tends to make sense:
+          </p>
+          <ul style={{ fontSize: 14.5, lineHeight: 1.9, color: C.ink, paddingLeft: 18 }}>
+            <li><strong>Value raise:</strong> your equity is well above what the villain would need to call — you want worse hands to pay more, not for them to fold.</li>
+            <li><strong>Bluffing/semi-bluffing makes more sense when:</strong> the board "looks scary" (favors a strong hand for you), the bet is small relative to the pot (lower required fold equity), you still have outs if called, and the opponent has already shown they fold easily in this type of spot.</li>
+            <li><strong>Avoid bluffing when:</strong> the pot is already large relative to your bet (high required fold equity), the villain tends to call too much ("calling station"), or you have no outs if called.</li>
+          </ul>
+        </Section>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Section title="Valor esperado (EV)">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          EV é a média de quanto você ganha (ou perde) se repetisse a mesma decisão infinitas vezes.
+          Para um call, de forma simplificada:
+        </p>
+        <div className="mono" style={{ background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "12px 16px", margin: "12px 0", fontSize: 14, color: C.felt }}>
+          EV(call) = (equity × pote se ganhar) − ((1 − equity) × valor do call)
+        </div>
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Se EV(call) for positivo, pagar é lucrativo no longo prazo — mesmo que você perca <em>essa</em> mão
+          específica. Isso é o que separa decisão boa de resultado bom.
+        </p>
+        <div className="mono" style={{ fontSize: 12.5, background: "rgba(28,27,25,0.04)", borderRadius: 8, padding: "12px 14px", lineHeight: 1.8, color: C.ink }}>
+          Exemplo: pote de 80, vilão aposta 20 (pote vira 100), você precisa pagar 20.<br />
+          Sua equity é 30% → EV(call) = 0,30 × 100 − 0,70 × 20 = 30 − 14 = <strong style={{ color: C.felt }}>+16</strong><br />
+          EV positivo: pagar é lucrativo, mesmo perdendo 70% das vezes.
+        </div>
+        <Expand label="Por que essa fórmula funciona? (exemplo com uma aposta simples)">
+          <p style={{ marginBottom: 10 }}>
+            Imagine uma aposta fora do poker: você paga R$20 para participar. Se um certo evento acontece (30%
+            de chance), você recebe R$100 de volta. Se não acontece (70% de chance), perde os R$20.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            <strong>Passo 1:</strong> Nos 30% das vezes que dá certo, seu ganho líquido é R$100 (o prêmio) − R$20
+            (o que você pagou) = mas para simplificar, tratamos como "ganha o pote" e separado "perde o call" —
+            é assim que EV é normalmente calculado em poker, olhando o pote e o custo do call separadamente.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            <strong>Passo 2:</strong> Multiplique cada resultado pela sua chance: 30% das vezes você ganha o pote
+            inteiro (100) → 0,30 × 100 = 30. 70% das vezes você só perde o que pagou (20) → 0,70 × 20 = 14 de
+            prejuízo esperado.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            <strong>Passo 3:</strong> Some ganho esperado menos perda esperada: 30 − 14 = <strong>+16</strong>.
+            Positivo significa que, repetindo essa decisão muitas vezes, você sai ganhando em média — mesmo
+            perdendo a maioria das vezes individualmente.
+          </p>
+          <p>
+            Esse é o mesmo raciocínio do exemplo do dado na aba Fundamentos: multiplicar cada desfecho por sua
+            probabilidade, e somar.
+          </p>
+        </Expand>
+      </Section>
+
+      <Section title="Pot odds: o atalho para decidir um call">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Em vez de calcular EV em dinheiro, dá pra converter direto em <strong>% de equity necessária</strong>:
+        </p>
+        <div className="mono" style={{ background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "12px 16px", margin: "12px 0", fontSize: 14, color: C.felt }}>
+          equity necessária = valor do call / (pote + valor do call)
+        </div>
+        <Expand label="Como essa fórmula é derivada da fórmula de EV acima">
+          <p style={{ marginBottom: 10 }}>
+            Queremos achar o ponto de equilíbrio: a equity mínima que faz EV(call) = 0 — abaixo disso, call é
+            prejuízo; acima, é lucro.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            Partindo de <span className="mono">EV = equity × pote − (1 − equity) × call</span>, igualamos a
+            zero: <span className="mono">0 = equity × pote − (1 − equity) × call</span>.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            Expandindo: <span className="mono">0 = equity × pote − call + equity × call</span>. Juntando os
+            termos com "equity": <span className="mono">call = equity × (pote + call)</span>.
+          </p>
+          <p>
+            Isolando equity: <span className="mono">equity = call / (pote + call)</span> — exatamente a fórmula
+            de pot odds. Ela nada mais é do que "resolver a equação de EV para equity igual a zero".
+          </p>
+        </Expand>
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink, margin: "16px 0" }}>
+          Se sua equity real (calculada na aba Calculadora) for <strong>maior</strong> que essa % exigida, pagar
+          é +EV. Se for menor, é −EV — desista.
+        </p>
+
+        <div className="flex flex-wrap gap-4 mb-3">
+          <Field label="Tamanho do pote (já com a aposta do vilão)">
+            <input type="number" min="0" value={potSize} onChange={(e) => setPotSize(Number(e.target.value))} className="mono" style={inputStyle} />
+          </Field>
+          <Field label="Quanto você precisa pagar (call)">
+            <input type="number" min="0" value={betToCall} onChange={(e) => setBetToCall(Number(e.target.value))} className="mono" style={inputStyle} />
+          </Field>
+        </div>
+        <p style={{ fontSize: 14.5, lineHeight: 1.6, color: C.ink }}>
+          Pot odds de <span className="mono">{potSize}:{betToCall}</span> → você precisa ganhar pelo menos{" "}
+          <strong className="mono">{requiredEquity.toFixed(1)}%</strong> das vezes.
+          {canDecide ? (
+            <>
+              {" "}Sua equity simulada é <strong className="mono">{heroPct.toFixed(1)}%</strong>, então este call é{" "}
+              <strong style={{ color: isProfitableCall ? C.felt : C.ruby }}>
+                {isProfitableCall ? "lucrativo (+EV) — pague" : "perdedor (−EV) — desista"}
+              </strong>.
+            </>
+          ) : (
+            <> Rode uma simulação na aba <button onClick={() => setActivePage("calculadora")} style={{ color: C.felt, textDecoration: "underline", fontWeight: 600 }}>Calculadora</button> para comparar com sua equity real.</>
+          )}
+        </p>
+      </Section>
+
+      <Section title="Implied odds: olhando além dessa aposta">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Pot odds só olha o pote de agora. <strong>Implied odds</strong> soma o dinheiro extra que você espera
+          ganhar <em>depois</em>, se completar sua mão — por exemplo, quando você tem um projeto de flush e
+          espera que o vilão pague mais uma aposta no river se você acertar. Isso significa que um call que
+          parece −EV pelas pot odds puras pode ser +EV na prática, se o vilão tende a pagar apostas grandes
+          depois. O oposto também existe: <strong>reverse implied odds</strong>, quando completar sua mão ainda
+          assim pode perder para uma mão melhor do vilão — comum com projetos "pequenos" tipo uma sequência
+          baixa contra um board que também permite flush.
+        </p>
+      </Section>
+
+      <Section title="E quando você aposta (raise) em vez de pagar?">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Até aqui vimos a decisão de <em>pagar</em>. Mas apostar ou dar raise muda o problema: agora você
+          ganha de duas formas — quando o vilão desiste (você fica com o pote, independente da sua mão) ou
+          quando ele paga e você tem a mão melhor. A chance de ele desistir se chama <strong>fold equity</strong>.
+        </p>
+
+        <div className="flex flex-wrap gap-4 mb-3 mt-3">
+          <Field label="Tamanho do pote antes da sua aposta">
+            <input type="number" min="0" value={potSize} onChange={(e) => setPotSize(Number(e.target.value))} className="mono" style={inputStyle} />
+          </Field>
+          <Field label="Quanto você apostaria (raise/bet)">
+            <input type="number" min="0" value={betSize} onChange={(e) => setBetSize(Number(e.target.value))} className="mono" style={inputStyle} />
+          </Field>
+        </div>
+
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Se sua mão não tiver <strong>nenhuma</strong> chance quando for paga (um blefe puro), a matemática é
+          simétrica à pot odds — mas do outro lado da mesa:
+        </p>
+        <div className="mono" style={{ background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "12px 16px", margin: "12px 0", fontSize: 14, color: C.felt }}>
+          fold equity necessária = aposta / (pote + aposta)
+        </div>
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Com esses números: você precisa que o vilão desista pelo menos{" "}
+          <strong className="mono">{pureBluffFold.toFixed(1)}%</strong> das vezes para um blefe puro valer a pena.
+        </p>
+
+        <Expand label="E se eu tenho alguma chance mesmo sendo pago? (semi-blefe)">
+          <p style={{ marginBottom: 10 }}>
+            Um <strong>semi-blefe</strong> é apostar com uma mão que ainda não é a melhor, mas tem outs — tipo
+            um projeto de flush no flop. Você ganha de três formas: o vilão desiste agora, ou paga e você
+            completa sua mão, ou paga e você não completa (perde).
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            A fórmula completa de EV: <span className="mono">EV = f × pote + (1−f) × (equity × (pote + 2×aposta) − aposta)</span>,
+            onde <span className="mono">f</span> é a fold equity do vilão e <span className="mono">equity</span> é
+            sua chance de vencer <em>quando ele paga</em>. O termo <span className="mono">(pote + 2×aposta)</span>{" "}
+            é o pote final se ele pagar (o pote original, mais sua aposta, mais o call dele).
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            Resolvendo essa equação para f = 0 (igual fizemos com pot odds), achamos a fold equity mínima
+            necessária para o semi-blefe valer a pena — e ela fica <em>menor</em> que a de um blefe puro, porque
+            você tem uma segunda chance de ganhar mesmo sendo pago.
+          </p>
+          <div className="flex flex-wrap gap-4 my-3">
+            <Field label="Sua equity estimada SE for pago (%)">
+              <input type="number" min="0" max="100" value={equityWhenCalled} onChange={(e) => setEquityWhenCalled(Number(e.target.value))} className="mono" style={inputStyle} />
+            </Field>
+          </div>
+          <p className="mono" style={{ fontSize: 13, background: "rgba(28,27,25,0.04)", borderRadius: 8, padding: "10px 14px" }}>
+            fold equity necessária (semi-blefe): <strong style={{ color: C.felt }}>{requiredFold.toFixed(1)}%</strong>{" "}
+            (contra {pureBluffFold.toFixed(1)}% se fosse um blefe puro com 0% de equity)
+          </p>
+        </Expand>
+
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink, marginTop: 16 }}>
+          Algumas ideias práticas de quando cada ação costuma fazer sentido:
+        </p>
+        <ul style={{ fontSize: 14.5, lineHeight: 1.9, color: C.ink, paddingLeft: 18 }}>
+          <li><strong>Raise por valor:</strong> sua equity está bem acima do que o vilão precisaria para pagar — você quer que mãos piores paguem mais, não que ele desista.</li>
+          <li><strong>Blefe/semi-blefe faz mais sentido quando:</strong> o board "assusta" (parece favorecer uma mão forte sua), a aposta é pequena relativo ao pote (fold equity necessária menor), você ainda tem outs caso seja pago, e o oponente já demonstrou que desiste com facilidade nesse tipo de spot.</li>
+          <li><strong>Evite blefar quando:</strong> o pote já está grande relativo à sua aposta (fold equity necessária alta), o vilão tende a pagar demais ("calling station"), ou você não tem outs se for pago.</li>
+        </ul>
+      </Section>
+    </>
+  );
+}
+
+function MonteCarloPage({ lang, heroCards, boardCount, boardCards, villainMode, villainCards, rangeSelection }) {
+  const [steps, setSteps] = useState(null);
+  const [running, setRunning] = useState(false);
+  const heroReady = heroCards[0] && heroCards[1];
+  const villainReady = villainMode === "specific" ? villainCards[0] && villainCards[1] : rangeSelection.size > 0;
+  const locale = lang === "en" ? "en-US" : "pt-BR";
+
+  const runConvergence = () => {
+    setRunning(true);
+    setTimeout(() => {
+      const board = boardCards.slice(0, boardCount);
+      const rangeCombosAll = villainMode === "range" ? [...rangeSelection].flatMap((k) => generateComboCards(k)) : null;
+      const trialCounts = [50, 200, 1000, 5000, 20000];
+      const out = trialCounts.map((t) => {
+        const res = simulate({ hero: heroCards, board, villainMode, villainFixed: villainCards, rangeCombosAll, trials: t });
+        const pct = res ? ((res.heroWin + res.tie / 2) / res.trials) * 100 : null;
+        const p = pct !== null ? pct / 100 : null;
+        const se = p !== null ? Math.sqrt((p * (1 - p)) / t) * 100 : null;
+        return { trials: t, pct, se };
+      });
+      setSteps(out);
+      setRunning(false);
+    }, 30);
+  };
+
+  if (lang === "en") {
+    return (
+      <>
+        <Section title="Why simulate instead of calculating exactly">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            With the flop on the table, 2 more cards still need to come from the ~45 remaining — that already
+            gives thousands of possible outcomes, even more when the villain has a whole range of hands.
+            Instead of enumerating everything, the <strong>Monte Carlo</strong> method draws one random
+            outcome at a time, sees who won, and repeats thousands of times. The fraction of wins converges to
+            the real probability — that's the <strong>Law of Large Numbers</strong>.
+          </p>
+          <Expand label="Law of Large Numbers, with coins instead of cards">
+            <p style={{ marginBottom: 10 }}>
+              Flip a fair coin 10 times. It's quite common to get, say, 7 heads and 3 tails — 70%, far from
+              the "theoretical" 50%. With few trials, chance carries a lot of weight.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              Now flip the same coin 10,000 times. The proportion of heads almost certainly lands between 49%
+              and 51% — very close to the expected 50%. No individual flip "knows" it should land at 50%, but
+              when you add up many, the deviations up and down tend to cancel out.
+            </p>
+            <p>
+              That's exactly the principle that lets us estimate equity: each individual simulation is like a
+              coin flip — unpredictable alone — but the average of thousands of them converges to the real
+              probability, whether it's 50%, 27%, or 83%.
+            </p>
+          </Expand>
+        </Section>
+
+        <Section title="How reliable is the estimate?">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+            Each simulation is like a political poll: the more "respondents" (hands simulated), the smaller
+            the margin of error. For an estimated proportion <span className="mono">p</span> with{" "}
+            <span className="mono">n</span> simulations, the standard error is:
+          </p>
+          <div className="mono" style={{ background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "12px 16px", margin: "12px 0", fontSize: 14, color: C.felt }}>
+            standard error = √( p × (1 − p) / n )
+          </div>
+          <Expand label="Why this specific formula? (intuition, without a formal proof)">
+            <p style={{ marginBottom: 10 }}>
+              Two ideas explain this formula. First, the term <span className="mono">p × (1−p)</span> is
+              largest when p is close to 50% (most unpredictable mix) and smallest when p is close to 0% or
+              100% (near-certain outcome, little variation possible). Makes sense: it's harder to "nail" the
+              exact proportion of something close to a coin flip than something nearly guaranteed.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              Second, dividing by <span className="mono">n</span> (and taking the square root) reflects that
+              adding more observations reduces uncertainty — but with diminishing returns: to cut the error in
+              half, you need to <strong>quadruple</strong> the number of simulations (because of the square
+              root). That's why going from 5,000 to 20,000 simulations helps a lot, but going from 20,000 to
+              40,000 helps proportionally less.
+            </p>
+            <p>
+              The same principle explains why political polls with ~1,000 to 2,000 respondents already achieve
+              margins of error of 2-3%: it's not the size of the total population that matters, it's the
+              sample size.
+            </p>
+          </Expand>
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink, marginTop: 12 }}>
+            With 1,000 simulations and an equity near 50%, the standard error is close to 1.6 percentage
+            points; with 20,000, it drops to about 0.35. That's why the Calculator offers more simulation
+            options when you need more precision — and why the result of fewer simulations swings more in the
+            table below.
+          </p>
+        </Section>
+
+        <Section title="The algorithm, step by step">
+          <ol style={{ fontSize: 14.5, lineHeight: 1.9, color: C.ink, paddingLeft: 18 }}>
+            <li>Remove the already-known cards from the deck (your hand + board).</li>
+            <li>Draw the villain's hand (fixed, or a random combo from the selected range).</li>
+            <li>Draw the missing board cards until it reaches 5.</li>
+            <li>Compare each player's best 5-card hand (among the possible combinations from their 7 available cards).</li>
+            <li>Record who won — and repeat thousands of times.</li>
+          </ol>
+        </Section>
+
+        <Section title="See the convergence with your current hand" note="Uses hero/board/villain from the Calculator tab">
+          {!heroReady || !villainReady ? (
+            <p style={{ fontSize: 14, color: "rgba(28,27,25,0.6)" }}>
+              Complete your hand and the villain on the Calculator tab to run this test.
+            </p>
+          ) : (
+            <div>
+              <button onClick={runConvergence} disabled={running} style={{ background: C.felt, color: C.ivory, border: "none", borderRadius: 8, padding: "9px 18px", fontWeight: 600, fontSize: 13.5, marginBottom: 16, opacity: running ? 0.7 : 1 }}>
+                {running ? "Running…" : "Run in increasing steps"}
+              </button>
+              {steps && (
+                <div className="flex flex-col gap-2">
+                  {steps.map((s) => (
+                    <div key={s.trials} className="flex items-center gap-3">
+                      <span className="mono" style={{ fontSize: 11.5, width: 84, color: "rgba(28,27,25,0.6)" }}>{s.trials.toLocaleString(locale)}×</span>
+                      <div style={{ flex: 1, height: 10, borderRadius: 5, background: "rgba(28,27,25,0.08)", overflow: "hidden" }}>
+                        <div style={{ width: `${s.pct}%`, height: "100%", background: C.felt }} />
+                      </div>
+                      <span className="mono" style={{ fontSize: 12.5, width: 90, textAlign: "right", color: C.ink, fontWeight: 600 }}>{s.pct.toFixed(1)}% ±{s.se.toFixed(1)}</span>
+                    </div>
+                  ))}
+                  <p style={{ fontSize: 12.5, color: "rgba(28,27,25,0.55)", marginTop: 8 }}>
+                    Notice how the margin of error (±, the standard error) shrinks as the number of simulations
+                    grows, and the estimate settles down.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </Section>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Section title="Por que simular em vez de calcular exato">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Com o flop na mesa, ainda faltam sair 2 cartas entre as ~45 restantes — isso já dá milhares de finais
+          possíveis, e mais ainda quando o vilão tem um range inteiro de mãos. Em vez de enumerar tudo, o método{" "}
+          <strong>Monte Carlo</strong> sorteia um final aleatório de cada vez, vê quem venceu, e repete milhares
+          de vezes. A fração de vitórias converge para a probabilidade real — isso é a{" "}
+          <strong>Lei dos Grandes Números</strong>.
+        </p>
+        <Expand label="Lei dos Grandes Números, com moedas em vez de cartas">
+          <p style={{ marginBottom: 10 }}>
+            Jogue uma moeda honesta 10 vezes. É bem comum sair, por exemplo, 7 caras e 3 coroas — 70%, bem longe
+            dos 50% "teóricos". Com poucas tentativas, o acaso pesa muito.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            Agora jogue a mesma moeda 10.000 vezes. A proporção de caras quase certamente fica entre 49% e 51%
+            — bem perto dos 50% esperados. Nenhuma tentativa individual "sabe" que deveria dar 50%, mas quando
+            você soma muitas, os desvios para cima e para baixo tendem a se cancelar.
+          </p>
+          <p>
+            É exatamente esse princípio que permite estimar a equity: cada simulação individual é como um
+            lançamento de moeda — imprevisível sozinha — mas a média de milhares delas converge para a
+            probabilidade real, seja ela 50%, 27% ou 83%.
+          </p>
+        </Expand>
+      </Section>
+
+      <Section title="Quão confiável é a estimativa?">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink }}>
+          Cada simulação é como uma pesquisa eleitoral: quanto mais "entrevistados" (mãos simuladas), menor a
+          margem de erro. Para uma proporção estimada <span className="mono">p</span> com{" "}
+          <span className="mono">n</span> simulações, o erro padrão é:
+        </p>
+        <div className="mono" style={{ background: "rgba(11,59,46,0.06)", borderRadius: 8, padding: "12px 16px", margin: "12px 0", fontSize: 14, color: C.felt }}>
+          erro padrão = √( p × (1 − p) / n )
+        </div>
+        <Expand label="Por que essa fórmula específica? (intuição, sem provar formalmente)">
+          <p style={{ marginBottom: 10 }}>
+            Duas ideias explicam essa fórmula. Primeiro, o termo <span className="mono">p × (1−p)</span> é maior
+            quando p está perto de 50% (mistura mais imprevisível) e menor quando p está perto de 0% ou 100%
+            (resultado quase certo, pouca variação possível). Faz sentido: é mais difícil "acertar" a proporção
+            exata de algo que é quase um empate do que de algo quase garantido.
+          </p>
+          <p style={{ marginBottom: 10 }}>
+            Segundo, dividir por <span className="mono">n</span> (e tirar a raiz) reflete que juntar mais
+            observações reduz a incerteza — mas com retornos decrescentes: para reduzir o erro pela metade,
+            você precisa <strong>quadruplicar</strong> o número de simulações (por causa da raiz quadrada). É
+            por isso que ir de 5.000 para 20.000 simulações ajuda bastante, mas ir de 20.000 para 40.000 ajuda
+            proporcionalmente menos.
+          </p>
+          <p>
+            O mesmo princípio explica por que pesquisas eleitorais com ~1.000 a 2.000 entrevistados já
+            conseguem margens de erro de 2-3%: não é o tamanho da população total que importa, é o tamanho da
+            amostra.
+          </p>
+        </Expand>
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink, marginTop: 12 }}>
+          Com 1.000 simulações e uma equity perto de 50%, o erro padrão fica perto de 1,6 pontos percentuais;
+          com 20.000, cai para cerca de 0,35. É por isso que a Calculadora oferece a opção de mais simulações
+          quando você precisa de mais precisão — e por isso que o resultado de poucas simulações oscila mais
+          na tabela abaixo.
+        </p>
+      </Section>
+
+      <Section title="O algoritmo, passo a passo">
+        <ol style={{ fontSize: 14.5, lineHeight: 1.9, color: C.ink, paddingLeft: 18 }}>
+          <li>Remove do baralho as cartas já conhecidas (sua mão + board).</li>
+          <li>Sorteia a mão do vilão (fixa, ou uma combinação aleatória do range selecionado).</li>
+          <li>Sorteia as cartas que faltam no board até completar 5.</li>
+          <li>Compara a melhor mão de 5 cartas de cada jogador (entre as combinações possíveis das 7 cartas disponíveis).</li>
+          <li>Registra quem venceu — e repete milhares de vezes.</li>
+        </ol>
+      </Section>
+
+      <Section title="Veja a convergência com sua mão atual" note="Usa hero/board/vilão da aba Calculadora">
+        {!heroReady || !villainReady ? (
+          <p style={{ fontSize: 14, color: "rgba(28,27,25,0.6)" }}>
+            Complete sua mão e o vilão na aba Calculadora para rodar este teste.
+          </p>
+        ) : (
+          <div>
+            <button onClick={runConvergence} disabled={running} style={{ background: C.felt, color: C.ivory, border: "none", borderRadius: 8, padding: "9px 18px", fontWeight: 600, fontSize: 13.5, marginBottom: 16, opacity: running ? 0.7 : 1 }}>
+              {running ? "Rodando…" : "Rodar em passos crescentes"}
+            </button>
+            {steps && (
+              <div className="flex flex-col gap-2">
+                {steps.map((s) => (
+                  <div key={s.trials} className="flex items-center gap-3">
+                    <span className="mono" style={{ fontSize: 11.5, width: 84, color: "rgba(28,27,25,0.6)" }}>{s.trials.toLocaleString(locale)}×</span>
+                    <div style={{ flex: 1, height: 10, borderRadius: 5, background: "rgba(28,27,25,0.08)", overflow: "hidden" }}>
+                      <div style={{ width: `${s.pct}%`, height: "100%", background: C.felt }} />
+                    </div>
+                    <span className="mono" style={{ fontSize: 12.5, width: 90, textAlign: "right", color: C.ink, fontWeight: 600 }}>{s.pct.toFixed(1)}% ±{s.se.toFixed(1)}</span>
+                  </div>
+                ))}
+                <p style={{ fontSize: 12.5, color: "rgba(28,27,25,0.55)", marginTop: 8 }}>
+                  Repare como a margem de erro (±, o erro padrão) encolhe conforme o número de simulações cresce,
+                  e a estimativa se estabiliza.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+      </Section>
+    </>
+  );
+}
+
+function GuiaStep({ n, title, children, demo }) {
+  return (
+    <div style={{ display: "flex", gap: 16, marginBottom: 28 }}>
+      <div className="mono" style={{
+        flexShrink: 0, width: 28, height: 28, borderRadius: "50%", background: C.felt, color: C.ivory,
+        display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700,
+      }}>{n}</div>
+      <div style={{ flex: 1 }}>
+        <h4 className="display" style={{ fontSize: 16.5, fontWeight: 600, color: C.ink, marginBottom: 6 }}>{title}</h4>
+        <div style={{ fontSize: 14, lineHeight: 1.7, color: "rgba(28,27,25,0.8)", marginBottom: demo ? 12 : 0 }}>{children}</div>
+        {demo && (
+          <div style={{ background: "rgba(11,59,46,0.05)", border: "1px solid rgba(11,59,46,0.12)", borderRadius: 10, padding: 14 }}>
+            {demo}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GuiaPage({ lang, setActivePage }) {
+  const demoRange = new Set(["AA", "KK", "QQ", "AKs", "AKo", "AQs"]);
+
+  if (lang === "en") {
+    return (
+      <>
+        <Section title="Guide: how to use the Calculator">
+          <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink, marginBottom: 22 }}>
+            The Calculator is the last tab — after reading this guide, you'll know exactly what every button
+            does. The examples below use the same visual components as the real app.
+          </p>
+
+          <GuiaStep n={1} title="Choose your hand" demo={
+            <div className="flex gap-3"><Card card={{ char: "A", suit: "s", key: "As" }} /><Card card={{ char: "K", suit: "s", key: "Ks" }} /></div>
+          }>
+            Click any empty slot (with a "+") to open the card picker. Choose your two hand cards. Cards
+            already used in another slot are disabled in the picker, to avoid repeating a card.
+          </GuiaStep>
+
+          <GuiaStep n={2} title="Deal the board" demo={
+            <div className="flex flex-wrap items-center gap-3">
+              <Card card={{ char: "K", suit: "h", key: "Kh" }} small />
+              <Card card={{ char: "7", suit: "d", key: "7d" }} small />
+              <Card card={{ char: "2", suit: "c", key: "2c" }} small />
+              <div className="flex gap-2 ml-1">
+                <StageBtn label="Flop" active />
+                <StageBtn label="Turn" />
+                <StageBtn label="River" disabled />
+                <StageBtn label="Reset" />
+              </div>
+            </div>
+          }>
+            <strong>Flop</strong> reveals 3 board cards, <strong>Turn</strong> adds the 4th (only enabled after
+            the flop), <strong>River</strong> adds the 5th (only after the turn). <strong>Reset</strong> clears
+            the whole board and goes back to pre-flop. Each board card also opens the same picker from step 1.
+          </GuiaStep>
+
+          <GuiaStep n={3} title="Set the villain" demo={
+            <div>
+              <div className="flex gap-2 mb-3"><ModeBtn label="Specific hand" active={false} /><ModeBtn label="Range" active /></div>
+              <div className="flex flex-wrap gap-2 mb-2"><PresetBtn label="Premium" /><PresetBtn label="Broadway" /></div>
+              <RangeGrid lang={lang} rangeSelection={demoRange} toggleRangeCell={() => {}} applyPreset={() => {}} />
+            </div>
+          }>
+            Choose <strong>Specific hand</strong> if you want to test against two exact cards (e.g. you know
+            the villain has AK). Choose <strong>Range</strong> to test against a set of possible hands — more
+            realistic when you don't know the exact cards. In the 13×13 grid, each cell is a hand "type": the
+            diagonal is pairs, above it is suited combos, below is offsuit. Click cell by cell, or use the
+            preset buttons (Pairs, Broadway, Premium, etc.) to select several at once. Selected cells turn
+            dark green.
+            <div style={{ marginTop: 12, fontSize: 13.5, lineHeight: 1.85 }}>
+              <div><strong>Clear</strong> — deselects everything, starts from zero.</div>
+              <div><strong>Pairs</strong> — selects all 13 possible pairs at once, from 22 to AA (it's the
+              entire diagonal of the grid — it already covers <em>every</em> pair that exists, there's no
+              "missing" option).</div>
+              <div><strong>Broadway</strong> — every combination among the high cards A, K, Q, J, T (pairs and
+              non-pairs), typically strong opening hands.</div>
+              <div><strong>Suited connectors</strong> — sequential cards of the same suit (98s, 87s, 76s...),
+              good for straight and flush draws.</div>
+              <div><strong>Premium</strong> — a handful of classic elite hands (AA-TT, AKs, AKo, AQs, AQo, AJs, KQs).</div>
+              <div><strong>Wide range</strong> — a broad mix (pairs + suited Aces + broadway + connectors),
+              simulating a looser/less selective opponent.</div>
+            </div>
+          </GuiaStep>
+
+          <GuiaStep n={4} title="Choose precision and calculate" demo={
+            <div className="flex flex-wrap items-center gap-3">
+              <select disabled className="mono" style={{ border: "1px solid rgba(28,27,25,0.25)", borderRadius: 6, padding: "8px 10px", background: "#fff", fontSize: 12 }}>
+                <option>5,000 simulations</option>
+              </select>
+              <button disabled style={{ background: C.felt, color: C.ivory, border: "none", borderRadius: 8, padding: "9px 18px", fontWeight: 600, fontSize: 13 }}>Calculate equity</button>
+            </div>
+          }>
+            The menu chooses how many random hands the simulation runs: <strong>1,000</strong> is nearly
+            instant, up to <strong>500,000</strong> for maximum precision (runs in batches, with a progress
+            bar, without freezing the page). More simulations reduce the margin of error — see the{" "}
+            <button onClick={() => setActivePage("montecarlo")} style={{ color: C.felt, textDecoration: "underline", fontWeight: 600 }}>Monte Carlo</button> tab to understand why. Click{" "}
+            <strong>Calculate equity</strong> to run it.
+          </GuiaStep>
+
+          <GuiaStep n={5} title="Read the result" demo={
+            <div>
+              <div className="flex flex-wrap gap-6 mb-3">
+                <Stat label="You win" pct={62.4} color={C.felt} />
+                <Stat label="Tie" pct={2.1} color={C.brass} />
+                <Stat label="Villain wins" pct={35.5} color={C.ruby} />
+              </div>
+              <div style={{ height: 12, borderRadius: 6, overflow: "hidden", display: "flex" }}>
+                <div style={{ width: "62.4%", background: C.felt }} /><div style={{ width: "2.1%", background: C.brass }} /><div style={{ width: "35.5%", background: C.ruby }} />
+              </div>
+            </div>
+          }>
+            The three numbers add up to 100%: how often your hand wins, ties, or loses. The bar below shows
+            the same proportion visually. Right underneath, a panel shows the "reasoning" — how many cards
+            remained in the deck and how many villain combos went into the count — so you can check the
+            simulation used what you expected.
+          </GuiaStep>
+        </Section>
+
+        <Section title="Where to go next">
+          <p style={{ fontSize: 14, lineHeight: 1.7, color: "rgba(28,27,25,0.75)" }}>
+            <strong>Fundamentals</strong> explains the math of counting hands. <strong>Outs & Rule of 2-4</strong>{" "}
+            and <strong>EV & Pot Odds</strong> use the hand you set up on the Calculator to show real
+            decisions. <strong>Monte Carlo</strong> opens up the engine behind the "Calculate equity" button.
+            All tabs are connected to the same hand — set it up on the Calculator and explore the rest.
+          </p>
+        </Section>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Section title="Guia: como usar a Calculadora">
+        <p style={{ fontSize: 14.5, lineHeight: 1.7, color: C.ink, marginBottom: 22 }}>
+          A Calculadora é a última aba — depois de ler este guia, você já sabe exatamente o que cada botão faz.
+          Os exemplos abaixo usam os mesmos componentes visuais do app de verdade.
+        </p>
+
+        <GuiaStep n={1} title="Escolha sua mão" demo={
+          <div className="flex gap-3"><Card card={{ char: "A", suit: "s", key: "As" }} /><Card card={{ char: "K", suit: "s", key: "Ks" }} /></div>
+        }>
+          Clique em qualquer slot vazio (com um "+") para abrir o seletor de cartas. Escolha as duas cartas da
+          sua mão. Cartas já usadas em outro slot ficam desabilitadas no seletor, para evitar repetir uma carta.
+        </GuiaStep>
+
+        <GuiaStep n={2} title="Revele o board" demo={
+          <div className="flex flex-wrap items-center gap-3">
+            <Card card={{ char: "K", suit: "h", key: "Kh" }} small />
+            <Card card={{ char: "7", suit: "d", key: "7d" }} small />
+            <Card card={{ char: "2", suit: "c", key: "2c" }} small />
+            <div className="flex gap-2 ml-1">
+              <StageBtn label="Flop" active />
+              <StageBtn label="Turn" />
+              <StageBtn label="River" disabled />
+              <StageBtn label="Reset" />
+            </div>
+          </div>
+        }>
+          <strong>Flop</strong> revela 3 cartas do board, <strong>Turn</strong> adiciona a 4ª (só habilita depois
+          do flop), <strong>River</strong> adiciona a 5ª (só depois do turn). <strong>Reset</strong> limpa o
+          board inteiro e volta pro pré-flop. Cada carta do board também abre o mesmo seletor do passo 1.
+        </GuiaStep>
+
+        <GuiaStep n={3} title="Defina o vilão" demo={
+          <div>
+            <div className="flex gap-2 mb-3"><ModeBtn label="Mão específica" active={false} /><ModeBtn label="Range" active /></div>
+            <div className="flex flex-wrap gap-2 mb-2"><PresetBtn label="Premium" /><PresetBtn label="Broadway" /></div>
+            <RangeGrid lang={lang} rangeSelection={demoRange} toggleRangeCell={() => {}} applyPreset={() => {}} />
+          </div>
+        }>
+          Escolha <strong>Mão específica</strong> se quiser testar contra duas cartas exatas (ex.: você sabe que
+          o vilão tem AK). Escolha <strong>Range</strong> para testar contra um conjunto de mãos possíveis — mais
+          realista quando você não sabe as cartas exatas. No grid 13×13, cada célula é um "tipo" de mão: a
+          diagonal são pares, acima são combinações suited, abaixo são offsuit. Clique célula por célula, ou use
+          os botões de preset (Pares, Broadway, Premium, etc.) para selecionar vários de uma vez. Células
+          selecionadas ficam verde-escuro.
+          <div style={{ marginTop: 12, fontSize: 13.5, lineHeight: 1.85 }}>
+            <div><strong>Limpar</strong> — desmarca tudo, começa do zero.</div>
+            <div><strong>Pares</strong> — seleciona os 13 pares possíveis de uma vez, de 22 até AA (é a diagonal
+            inteira do grid — já cobre <em>todos</em> os pares que existem, não há uma opção "faltando").</div>
+            <div><strong>Broadway</strong> — todas as combinações entre as cartas altas A, K, Q, J, T (pares e
+            não-pares), tipicamente mãos fortes de abertura.</div>
+            <div><strong>Conectores suited</strong> — cartas sequenciais do mesmo naipe (98s, 87s, 76s...), boas
+            para projetos de sequência e flush.</div>
+            <div><strong>Premium</strong> — um punhado de mãos clássicas de elite (AA-TT, AKs, AKo, AQs, AQo, AJs, KQs).</div>
+            <div><strong>Range largo</strong> — uma mistura ampla (pares + Ases suited + broadway + conectores),
+            simulando um oponente mais solto/menos seletivo.</div>
+          </div>
+        </GuiaStep>
+
+        <GuiaStep n={4} title="Escolha a precisão e calcule" demo={
+          <div className="flex flex-wrap items-center gap-3">
+            <select disabled className="mono" style={{ border: "1px solid rgba(28,27,25,0.25)", borderRadius: 6, padding: "8px 10px", background: "#fff", fontSize: 12 }}>
+              <option>5.000 simulações</option>
+            </select>
+            <button disabled style={{ background: C.felt, color: C.ivory, border: "none", borderRadius: 8, padding: "9px 18px", fontWeight: 600, fontSize: 13 }}>Calcular equity</button>
+          </div>
+        }>
+          O menu escolhe quantas mãos aleatórias a simulação roda: <strong>1.000</strong> é quase instantâneo,
+          até <strong>500.000</strong> para máxima precisão (roda em lotes, com barra de progresso, sem travar a
+          página). Mais simulações reduzem a margem de erro — veja a aba{" "}
+          <button onClick={() => setActivePage("montecarlo")} style={{ color: C.felt, textDecoration: "underline", fontWeight: 600 }}>Monte Carlo</button> para entender por quê. Clique em{" "}
+          <strong>Calcular equity</strong> para rodar.
+        </GuiaStep>
+
+        <GuiaStep n={5} title="Leia o resultado" demo={
+          <div>
+            <div className="flex flex-wrap gap-6 mb-3">
+              <Stat label="Você vence" pct={62.4} color={C.felt} />
+              <Stat label="Empate" pct={2.1} color={C.brass} />
+              <Stat label="Vilão vence" pct={35.5} color={C.ruby} />
+            </div>
+            <div style={{ height: 12, borderRadius: 6, overflow: "hidden", display: "flex" }}>
+              <div style={{ width: "62.4%", background: C.felt }} /><div style={{ width: "2.1%", background: C.brass }} /><div style={{ width: "35.5%", background: C.ruby }} />
+            </div>
+          </div>
+        }>
+          Os três números somam 100%: quanto sua mão vence, empata ou perde. A barra abaixo é a mesma proporção
+          visualmente. Logo abaixo, um painel mostra o "raciocínio" — quantas cartas restavam no baralho e
+          quantas combinações do vilão entraram na conta — para você conferir que a simulação usou o que você
+          esperava.
+        </GuiaStep>
+      </Section>
+
+      <Section title="Para onde ir depois">
+        <p style={{ fontSize: 14, lineHeight: 1.7, color: "rgba(28,27,25,0.75)" }}>
+          <strong>Fundamentos</strong> explica a matemática de contar mãos. <strong>Outs & Regra 2-4</strong> e{" "}
+          <strong>EV & Pot Odds</strong> usam a mão que você montar na Calculadora para mostrar decisões reais.{" "}
+          <strong>Monte Carlo</strong> abre o motor por trás do botão "Calcular equity". Todas as abas estão
+          conectadas à mesma mão — monte ela na Calculadora e explore as outras.
+        </p>
+      </Section>
+    </>
+  );
+}
+
+/* ================================== APP ================================== */
+
+const PAGES = [
+  { id: "guia", pt: "Guia", en: "Guide" },
+  { id: "fundamentos", pt: "Fundamentos", en: "Fundamentals" },
+  { id: "outs", pt: "Outs & Regra 2-4", en: "Outs & Rule of 2-4" },
+  { id: "ev", pt: "EV & Pot Odds", en: "EV & Pot Odds" },
+  { id: "montecarlo", pt: "Monte Carlo", en: "Monte Carlo" },
+  { id: "calculadora", pt: "Calculadora", en: "Calculator" },
+];
+
+function App() {
+  const [lang, setLang] = useState("pt");
+  const [activePage, setActivePage] = useState("guia");
+  const [heroCards, setHeroCards] = useState([null, null]);
+  const [boardCount, setBoardCount] = useState(0);
+  const [boardCards, setBoardCards] = useState([null, null, null, null, null]);
+  const [villainMode, setVillainMode] = useState("specific");
+  const [villainCards, setVillainCards] = useState([null, null]);
+  const [rangeSelection, setRangeSelection] = useState(new Set());
+  const [trials, setTrials] = useState(5000);
+  const [results, setResults] = useState(null);
+  const [simulating, setSimulating] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState("");
+  const [picker, setPicker] = useState(null);
+  const [potSize, setPotSize] = useState(100);
+  const [betToCall, setBetToCall] = useState(25);
+
+  const usedKeys = useMemo(() => {
+    const s = new Set();
+    heroCards.forEach((c) => c && s.add(c.key));
+    boardCards.slice(0, boardCount).forEach((c) => c && s.add(c.key));
+    if (villainMode === "specific") villainCards.forEach((c) => c && s.add(c.key));
+    return s;
+  }, [heroCards, boardCards, boardCount, villainMode, villainCards]);
+
+  const openPicker = (target, index) => setPicker({ target, index });
+
+  const assignCard = (card) => {
+    if (!picker) return;
+    const { target, index } = picker;
+    if (target === "hero") { const next = [...heroCards]; next[index] = card; setHeroCards(next); }
+    else if (target === "board") { const next = [...boardCards]; next[index] = card; setBoardCards(next); }
+    else if (target === "villain") { const next = [...villainCards]; next[index] = card; setVillainCards(next); }
+    setResults(null);
+    setPicker(null);
+  };
+
+  const toggleRangeCell = (key) => {
+    const next = new Set(rangeSelection);
+    next.has(key) ? next.delete(key) : next.add(key);
+    setRangeSelection(next);
+    setResults(null);
+  };
+
+  const applyPreset = (fn) => { setRangeSelection(fn()); setResults(null); };
+
+  const runSimulation = useCallback(() => {
+    setError("");
+    const en = lang === "en";
+    if (!heroCards[0] || !heroCards[1]) { setError(en ? "Choose both hero cards first." : "Escolha as duas cartas do herói primeiro."); return; }
+    const board = boardCards.slice(0, boardCount);
+    if (board.some((c) => !c)) { setError(en ? "Complete the board cards (or go back a stage)." : "Complete as cartas do board (ou reduza a etapa)."); return; }
+    if (villainMode === "specific") {
+      if (!villainCards[0] || !villainCards[1]) { setError(en ? "Choose the villain's two cards, or switch to 'Range'." : "Escolha as duas cartas do vilão, ou mude para 'Range'."); return; }
+    } else if (rangeSelection.size === 0) { setError(en ? "Select at least one hand in the villain's range." : "Selecione ao menos uma mão no range do vilão."); return; }
+
+    const rangeCombosAll = villainMode === "range" ? [...rangeSelection].flatMap((k) => generateComboCards(k)) : null;
+    const setup = buildSimSetup({ hero: heroCards, board, villainMode, villainFixed: villainCards, rangeCombosAll });
+    if (!setup) { setError(en ? "No valid villain combo remained (card conflict)." : "Nenhuma combinação válida do vilão sobrou (conflito de cartas)."); return; }
+
+    setSimulating(true);
+    setProgress(0);
+    const acc = { heroWin: 0, tie: 0, villWin: 0 };
+    let done = 0;
+    const batchSize = 2000;
+
+    function step() {
+      const n = Math.min(batchSize, trials - done);
+      const r = runBatch(setup, heroCards, board, villainMode, villainCards, n);
+      acc.heroWin += r.heroWin; acc.tie += r.tie; acc.villWin += r.villWin;
+      done += n;
+      setProgress(done / trials);
+      if (done < trials) {
+        setTimeout(step, 0);
+      } else {
+        setResults({ heroWin: acc.heroWin, tie: acc.tie, villWin: acc.villWin, trials, deckSizeAtStart: setup.deckSizeAtStart, comboPoolSize: setup.comboPool ? setup.comboPool.length : null });
+        setSimulating(false);
+      }
+    }
+    step();
+  }, [heroCards, boardCards, boardCount, villainMode, villainCards, rangeSelection, trials, lang]);
+
+  const sharedState = {
+    lang, heroCards, boardCount, boardCards, villainMode, setVillainMode, villainCards,
+    rangeSelection, toggleRangeCell, applyPreset, trials, setTrials, results, simulating, progress,
+    error, openPicker, setBoardCount, setBoardCards, setResults, runSimulation, setActivePage,
+  };
+
+  const en = lang === "en";
+
+  return (
+    <div style={{ fontFamily: "'Inter', sans-serif", background: C.felt, minHeight: "100vh" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap');
+        .felt-texture { background-image: radial-gradient(circle at 20% 20%, rgba(255,255,255,0.035), transparent 40%), radial-gradient(circle at 80% 80%, rgba(255,255,255,0.03), transparent 45%); }
+        .display { font-family: 'Fraunces', serif; }
+        .mono { font-family: 'IBM Plex Mono', monospace; }
+        button { cursor: pointer; }
+        ::selection { background: #C9A24B; color: #14100D; }
+      `}</style>
+
+      <div className="felt-texture" style={{ padding: "48px 20px 28px", textAlign: "center", borderBottom: "1px solid rgba(201,162,75,0.35)", position: "relative" }}>
+        <div style={{ position: "absolute", top: "calc(14px + env(safe-area-inset-top, 0px))", right: 16, display: "flex", background: "rgba(237,230,214,0.1)", borderRadius: 20, padding: 3, border: "1px solid rgba(201,162,75,0.4)" }}>
+          <button onClick={() => setLang("pt")} className="mono" style={{ padding: "5px 12px", borderRadius: 16, fontSize: 11.5, fontWeight: 700, background: !en ? C.brass : "transparent", color: !en ? "#14100D" : "rgba(237,230,214,0.7)" }}>PT</button>
+          <button onClick={() => setLang("en")} className="mono" style={{ padding: "5px 12px", borderRadius: 16, fontSize: 11.5, fontWeight: 700, background: en ? C.brass : "transparent", color: en ? "#14100D" : "rgba(237,230,214,0.7)" }}>EN</button>
+        </div>
+        <div className="mono" style={{ color: C.brass, fontSize: 13, letterSpacing: "0.25em", marginBottom: 14 }}>{en ? "TEXAS HOLD'EM · MONTE CARLO SIMULATOR" : "TEXAS HOLD'EM · SIMULADOR MONTE CARLO"}</div>
+        <h1 className="display" style={{ color: C.ivory, fontSize: "clamp(32px, 6vw, 54px)", fontWeight: 600, margin: 0 }}>{en ? "The Equity Table" : "A Mesa de Equity"}</h1>
+        <p style={{ color: "rgba(237,230,214,0.75)", maxWidth: 560, margin: "14px auto 0", fontSize: 15.5, lineHeight: 1.6 }}>
+          {en
+            ? "A short course in probability applied to poker, with an equity calculator at the end — start with the Guide, or jump straight to whichever concept you want."
+            : "Um curso curto de probabilidade aplicada ao poker, com uma calculadora de equity no final — comece pelo Guia, ou pule direto pro conceito que quiser."}
+        </p>
+      </div>
+
+      <div style={{ position: "sticky", top: "env(safe-area-inset-top, 0px)", zIndex: 10, background: C.ivory, borderBottom: "1px solid rgba(28,27,25,0.12)", overflowX: "auto" }}>
+        <div style={{ maxWidth: 880, margin: "0 auto", display: "flex", gap: 2, padding: "0 12px" }}>
+          {PAGES.map((p) => (
+            <button key={p.id} onClick={() => setActivePage(p.id)} className="mono" style={{
+              padding: "13px 14px", fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap",
+              background: "none", border: "none", borderBottom: activePage === p.id ? `2.5px solid ${C.felt}` : "2.5px solid transparent",
+              color: activePage === p.id ? C.felt : "rgba(28,27,25,0.5)",
+            }}>{en ? p.en : p.pt}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 880, margin: "0 auto", padding: "32px 18px 80px" }}>
+        <div style={{ background: C.ivory, borderRadius: 14, padding: "28px 24px", boxShadow: "0 10px 30px rgba(0,0,0,0.35)" }}>
+          {activePage === "guia" && <GuiaPage lang={lang} setActivePage={setActivePage} />}
+          {activePage === "calculadora" && <CalculadoraPage {...sharedState} />}
+          {activePage === "fundamentos" && <FundamentosPage lang={lang} />}
+          {activePage === "outs" && <OutsPage lang={lang} heroCards={heroCards} boardCount={boardCount} boardCards={boardCards} setActivePage={setActivePage} results={results} villainMode={villainMode} />}
+          {activePage === "ev" && <EVPage lang={lang} potSize={potSize} setPotSize={setPotSize} betToCall={betToCall} setBetToCall={setBetToCall} results={results} setActivePage={setActivePage} />}
+          {activePage === "montecarlo" && <MonteCarloPage lang={lang} heroCards={heroCards} boardCount={boardCount} boardCards={boardCards} villainMode={villainMode} villainCards={villainCards} rangeSelection={rangeSelection} />}
+
+          {activePage === "calculadora" && (
+            <div style={{ borderTop: "1px solid rgba(28,27,25,0.15)", paddingTop: 22, marginTop: 8 }}>
+              <h3 className="display" style={{ fontSize: 19, fontWeight: 600, marginBottom: 14, color: C.ink }}>{en ? "Quick concepts" : "Conceitos rápidos"}</h3>
+              <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+                {en ? (
+                  <>
+                    <Glossary symbol="♠" title="Equity" text="The % of the time your hand wins if the rest of the cards come out randomly. See the Monte Carlo tab to understand how it's calculated." />
+                    <Glossary symbol="♦" title="Pot odds" text="The relationship between how much you pay and the pot. Fully explored on the EV & Pot Odds tab." />
+                    <Glossary symbol="♣" title="Outs" text="Cards that improve your hand. Count yours on the Outs & Rule of 2-4 tab." />
+                  </>
+                ) : (
+                  <>
+                    <Glossary symbol="♠" title="Equity" text="A % de vezes que sua mão vence se o resto das cartas saírem aleatoriamente. Veja a aba Monte Carlo para entender como é calculada." />
+                    <Glossary symbol="♦" title="Pot odds" text="A relação entre quanto você paga e o pote. Explorada por completo na aba EV & Pot Odds." />
+                    <Glossary symbol="♣" title="Outs" text="Cartas que melhoram sua mão. Conte a sua na aba Outs & Regra 2-4." />
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {picker && (
+        <div onClick={() => setPicker(null)} style={{ position: "fixed", inset: 0, background: "rgba(11,15,13,0.65)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: C.ivory, borderRadius: 12, padding: 20, maxWidth: 420, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.5)" }}>
+            <div className="flex justify-between items-center mb-3">
+              <h4 className="display" style={{ fontSize: 17, fontWeight: 600, color: C.ink }}>{en ? "Choose a card" : "Escolha uma carta"}</h4>
+              <button onClick={() => setPicker(null)} style={{ color: C.ink, fontSize: 18 }}>✕</button>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              {SUITS.map((s) => (
+                <div key={s} className="flex gap-1.5">
+                  {RANK_CHARS.map((r) => {
+                    const key = r + s;
+                    const used = usedKeys.has(key);
+                    const red = SUIT_RED[s];
+                    return (
+                      <button key={key} disabled={used} onClick={() => assignCard({ rank: RANK_VALUE[r], suit: s, char: r, key })} className="mono" style={{
+                        flex: 1, height: 34, borderRadius: 5, fontSize: 12.5, fontWeight: 600,
+                        border: "1px solid rgba(28,27,25,0.2)", background: used ? "rgba(28,27,25,0.08)" : "#fff",
+                        color: used ? "rgba(28,27,25,0.25)" : red ? C.ruby : C.ink,
+                      }}>{r}{SUIT_SYMBOL[s]}</button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+<script defer src="/_vercel/insights/script.js"></script>
+</body>
+</html>
